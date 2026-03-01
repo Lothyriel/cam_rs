@@ -112,6 +112,11 @@ struct MoveRequest {
 }
 
 #[derive(Deserialize)]
+struct StopRequest {
+    profile_token: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct PresetRequest {
     preset_token: String,
     profile_token: Option<String>,
@@ -140,6 +145,7 @@ async fn main() {
         .route("/api/onvif/profiles", get(onvif_profiles))
         .route("/api/onvif/presets", get(onvif_presets))
         .route("/api/onvif/move", post(onvif_move))
+        .route("/api/onvif/stop", post(onvif_stop))
         .route("/api/onvif/goto-preset", post(onvif_goto_preset))
         .with_state(app_state);
 
@@ -194,17 +200,13 @@ async fn onvif_move(
     let soap = format!(
         r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
   <s:Body>
-    <tptz:RelativeMove>
+    <tptz:ContinuousMove>
       <tptz:ProfileToken>{profile}</tptz:ProfileToken>
-      <tptz:Translation>
+      <tptz:Velocity>
         <tt:PanTilt x="{x}" y="{y}" />
         <tt:Zoom x="{zoom}" />
-      </tptz:Translation>
-      <tptz:Speed>
-        <tt:PanTilt x="0.5" y="0.5" />
-        <tt:Zoom x="0.5" />
-      </tptz:Speed>
-    </tptz:RelativeMove>
+      </tptz:Velocity>
+    </tptz:ContinuousMove>
   </s:Body>
 </s:Envelope>"#,
         profile = profile,
@@ -215,6 +217,28 @@ async fn onvif_move(
 
     send_onvif_soap_raw_to(&state, &soap, &state.cfg.onvif_ptz_url).await?;
     Ok("move sent")
+}
+
+async fn onvif_stop(
+    State(state): State<AppState>,
+    Json(payload): Json<StopRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let profile = profile_token_or_err(&state, payload.profile_token.as_deref())?;
+    let soap = format!(
+        r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+  <s:Body>
+    <tptz:Stop>
+      <tptz:ProfileToken>{profile}</tptz:ProfileToken>
+      <tptz:PanTilt>true</tptz:PanTilt>
+      <tptz:Zoom>true</tptz:Zoom>
+    </tptz:Stop>
+  </s:Body>
+</s:Envelope>"#,
+        profile = profile,
+    );
+
+    send_onvif_soap_raw_to(&state, &soap, &state.cfg.onvif_ptz_url).await?;
+    Ok("stop sent")
 }
 
 async fn onvif_presets(

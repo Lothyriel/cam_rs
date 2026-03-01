@@ -129,6 +129,7 @@
       font-size: 1.1rem;
       font-weight: 700;
       cursor: pointer;
+      touch-action: none;
     }
 
     button:hover:not(:disabled) {
@@ -251,15 +252,15 @@
 
         <div class="dpad" id="ptz-controls">
           <button class="ghost" aria-hidden="true" tabindex="-1"></button>
-          <button data-x="0" data-y="-0.25" aria-label="Move up">↑</button>
+          <button data-x="0" data-y="-0.45" aria-label="Move up">↑</button>
           <button class="ghost" aria-hidden="true" tabindex="-1"></button>
 
-          <button data-x="-0.25" data-y="0" aria-label="Move left">←</button>
+          <button data-x="-0.45" data-y="0" aria-label="Move left">←</button>
           <button class="home" data-preset="1" disabled aria-label="Go home">Home</button>
-          <button data-x="0.25" data-y="0" aria-label="Move right">→</button>
+          <button data-x="0.45" data-y="0" aria-label="Move right">→</button>
 
           <button class="ghost" aria-hidden="true" tabindex="-1"></button>
-          <button data-x="0" data-y="0.25" aria-label="Move down">↓</button>
+          <button data-x="0" data-y="0.45" aria-label="Move down">↓</button>
           <button class="ghost" aria-hidden="true" tabindex="-1"></button>
         </div>
 
@@ -365,30 +366,71 @@
 
     loadProfiles();
 
-    document.querySelectorAll('#ptz-controls button').forEach(btn => {
-      if (btn.classList.contains('ghost')) return;
+    goHomeBtn.addEventListener('click', async () => {
+      try {
+        if (!selectedPresetToken) throw new Error('No preset token available for this profile');
+        await postJson('/api/onvif/goto-preset', {
+          preset_token: selectedPresetToken,
+          profile_token: selectedProfileToken,
+        });
+      } catch (err) {
+        setStatus(`Error: ${err.message}`, true);
+      }
+    });
 
-      btn.addEventListener('click', async () => {
+    let activeMoveButton = null;
+    async function sendStop() {
+      await postJson('/api/onvif/stop', { profile_token: selectedProfileToken });
+    }
+
+    function bindDirectionalButton(btn) {
+      const start = async (event) => {
+        if (activeMoveButton === btn) return;
+        event.preventDefault();
+        activeMoveButton = btn;
         try {
-          if (btn.dataset.preset) {
-            if (!selectedPresetToken) throw new Error('No preset token available for this profile');
-            await postJson('/api/onvif/goto-preset', {
-              preset_token: selectedPresetToken,
-              profile_token: selectedProfileToken,
-            });
-            return;
-          }
-
           await postJson('/api/onvif/move', {
             x: Number(btn.dataset.x || 0),
             y: Number(btn.dataset.y || 0),
-            zoom: Number(btn.dataset.z || 0),
+            zoom: 0,
             profile_token: selectedProfileToken,
           });
         } catch (err) {
+          activeMoveButton = null;
           setStatus(`Error: ${err.message}`, true);
         }
+      };
+
+      const stop = async (event) => {
+        if (activeMoveButton !== btn) return;
+        event.preventDefault();
+        activeMoveButton = null;
+        try {
+          await sendStop();
+        } catch (err) {
+          setStatus(`Error: ${err.message}`, true);
+        }
+      };
+
+      btn.addEventListener('pointerdown', start);
+      btn.addEventListener('pointerup', stop);
+      btn.addEventListener('pointercancel', stop);
+      btn.addEventListener('lostpointercapture', stop);
+      btn.addEventListener('pointerleave', (event) => {
+        if (event.buttons === 1) stop(event);
       });
+      btn.addEventListener('contextmenu', (event) => event.preventDefault());
+    }
+
+    document.querySelectorAll('#ptz-controls button[data-x]').forEach(bindDirectionalButton);
+    window.addEventListener('pointerup', async () => {
+      if (!activeMoveButton) return;
+      activeMoveButton = null;
+      try {
+        await sendStop();
+      } catch (err) {
+        setStatus(`Error: ${err.message}`, true);
+      }
     });
   </script>
 </body>
