@@ -8,7 +8,6 @@
     body { margin: 0; padding: 20px; font-family: system-ui, sans-serif; background: #0b1220; color: #e5e7eb; }
     .container { max-width: 980px; margin: 0 auto; display: grid; gap: 16px; }
     .card { background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 14px; }
-    .password { color: #22c55e; font-family: ui-monospace, monospace; }
     .video-wrap { aspect-ratio: 16 / 9; width: 100%; border: 1px solid #334155; border-radius: 10px; overflow: hidden; background: #020617; }
     .video-wrap iframe { width: 100%; height: 100%; border: 0; }
     .controls { display: grid; grid-template-columns: repeat(3, minmax(80px, 1fr)); gap: 8px; max-width: 340px; }
@@ -20,7 +19,6 @@
 </head>
 <body>
   <div class="container">
-    <div class="card"><h2>Web Password</h2><div class="password" id="pwd"></div></div>
     <div class="card">
       <h2>WebRTC Video</h2>
       <div class="video-wrap">
@@ -49,7 +47,6 @@
   </div>
 
   <script>
-    const WEB_PASSWORD = __WEB_PASSWORD__;
     const WEBRTC_URL = __WEBRTC_URL__;
     const CONFIGURED_PROFILE_TOKEN = __CONFIGURED_PROFILE_TOKEN__;
 
@@ -61,7 +58,6 @@
     const profileSelectEl = document.getElementById('profile-select');
 
     let selectedProfileToken = CONFIGURED_PROFILE_TOKEN || null;
-    document.getElementById('pwd').textContent = WEB_PASSWORD;
     const webrtcFrame = document.getElementById('webrtc-frame');
     webrtcFrame.src = WEBRTC_URL;
     videoStatusEl.textContent = `WebRTC source: ${WEBRTC_URL}`;

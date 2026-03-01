@@ -21,7 +21,6 @@ struct AppState {
 
 #[derive(Clone)]
 struct Config {
-    web_password: String,
     webrtc_url: String,
     onvif_username: String,
     onvif_password: String,
@@ -39,8 +38,6 @@ enum OnvifAuthMode {
 
 impl Config {
     fn from_env() -> Result<Self, String> {
-        let web_password =
-            env::var("WEB_PASSWORD").map_err(|_| "WEB_PASSWORD is required".to_string())?;
         let webrtc_url =
             env::var("WEBRTC_URL").map_err(|_| "WEBRTC_URL is required".to_string())?;
         let onvif_url = env::var("ONVIF_URL").map_err(|_| "ONVIF_URL is required".to_string())?;
@@ -65,7 +62,6 @@ impl Config {
         };
 
         Ok(Self {
-            web_password,
             webrtc_url,
             onvif_media_url: rewrite_onvif_device_to_service(&onvif_url),
             onvif_ptz_url: rewrite_onvif_service_to_device(&onvif_url),
@@ -145,15 +141,12 @@ async fn main() {
 }
 
 async fn index(State(state): State<AppState>) -> Html<String> {
-    let pass =
-        serde_json::to_string(&state.cfg.web_password).unwrap_or_else(|_| "\"\"".to_string());
     let webrtc_url =
         serde_json::to_string(&state.cfg.webrtc_url).unwrap_or_else(|_| "\"\"".to_string());
     let configured = serde_json::to_string(&state.cfg.onvif_profile_token)
         .unwrap_or_else(|_| "null".to_string());
 
     let html = HTML_TEMPLATE
-        .replace("__WEB_PASSWORD__", &pass)
         .replace("__WEBRTC_URL__", &webrtc_url)
         .replace("__CONFIGURED_PROFILE_TOKEN__", &configured);
 
