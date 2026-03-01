@@ -24,7 +24,6 @@
       <h2>ONVIF PTZ Controls</h2>
       <div id="configured-token"></div>
       <div id="active-token"></div>
-      <button id="load-profiles">Load ONVIF Profiles</button>
       <select id="profile-select"></select>
       <ul id="profiles"></ul>
       <div class="controls" id="ptz-controls">
@@ -119,7 +118,6 @@
       }
     }
 
-    document.getElementById('load-profiles').addEventListener('click', loadProfiles);
     profileSelectEl.addEventListener('change', () => {
       selectedProfileToken = profileSelectEl.value || null;
       updateActiveTokenLabel();
