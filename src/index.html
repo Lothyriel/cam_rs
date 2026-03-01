@@ -14,7 +14,6 @@
     button, select { background: #0b1220; color: #e5e7eb; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; }
     ul { padding-left: 20px; margin: 8px 0 0; font-family: ui-monospace, monospace; }
     #status { font-family: ui-monospace, monospace; min-height: 1.2em; margin-top: 10px; }
-    #video-status { font-family: ui-monospace, monospace; min-height: 1.2em; margin-top: 10px; }
   </style>
 </head>
 <body>
@@ -24,7 +23,6 @@
       <div class="video-wrap">
         <iframe id="webrtc-frame" allow="autoplay; fullscreen; picture-in-picture"></iframe>
       </div>
-      <div id="video-status"></div>
     </div>
     <div class="card">
       <h2>ONVIF PTZ Controls</h2>
@@ -32,11 +30,11 @@
       <div id="active-token"></div>
       <select id="profile-select"></select>
       <ul id="profiles"></ul>
+      <ul id="presets"></ul>
       <div class="controls" id="ptz-controls">
         <button data-x="0" data-y="-0.6">Up</button>
-        <button data-stop="1">Stop</button>
         <button data-x="-0.6" data-y="0">Left</button>
-        <button data-preset="Home">Go Home</button>
+        <button data-preset="1" disabled>Go Home</button>
         <button data-x="0.6" data-y="0">Right</button>
         <button data-x="0" data-y="0.6">Down</button>
       </div>
@@ -48,17 +46,18 @@
     const WEBRTC_URL = __WEBRTC_URL__;
     const CONFIGURED_PROFILE_TOKEN = __CONFIGURED_PROFILE_TOKEN__;
 
-    const videoStatusEl = document.getElementById('video-status');
     const statusEl = document.getElementById('status');
     const profilesEl = document.getElementById('profiles');
+    const presetsEl = document.getElementById('presets');
     const configuredTokenEl = document.getElementById('configured-token');
     const activeTokenEl = document.getElementById('active-token');
     const profileSelectEl = document.getElementById('profile-select');
+    const goHomeBtn = document.querySelector('button[data-preset]');
 
     let selectedProfileToken = CONFIGURED_PROFILE_TOKEN || null;
+    let selectedPresetToken = null;
     const webrtcFrame = document.getElementById('webrtc-frame');
     webrtcFrame.src = WEBRTC_URL;
-    videoStatusEl.textContent = `WebRTC source: ${WEBRTC_URL}`;
     configuredTokenEl.textContent = CONFIGURED_PROFILE_TOKEN
       ? `Configured profile token: ${CONFIGURED_PROFILE_TOKEN}`
       : 'Configured profile token: (not set)';
@@ -104,14 +103,46 @@
         if (!profileSelectEl.value && profileSelectEl.options.length) profileSelectEl.selectedIndex = 0;
         selectedProfileToken = profileSelectEl.value || selectedProfileToken || null;
         updateActiveTokenLabel();
+        await loadPresets();
       } catch (err) {
         profilesEl.innerHTML = `<li>Error: ${err.message}</li>`;
+        goHomeBtn.disabled = true;
+      }
+    }
+
+    async function loadPresets() {
+      try {
+        selectedPresetToken = null;
+        goHomeBtn.disabled = true;
+        presetsEl.innerHTML = '';
+        if (!selectedProfileToken) {
+          return;
+        }
+
+        const res = await fetch(`/api/onvif/presets?profile_token=${encodeURIComponent(selectedProfileToken)}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || JSON.stringify(data));
+
+        const presets = data.presets || [];
+        for (const p of presets) {
+          const li = document.createElement('li');
+          li.textContent = `${p.token} - ${p.name || '(no name)'}`;
+          presetsEl.appendChild(li);
+        }
+
+        const homeByName = presets.find(p => (p.name || '').toLowerCase() === 'home');
+        selectedPresetToken = (homeByName || presets[0] || {}).token || null;
+        goHomeBtn.disabled = !selectedPresetToken;
+      } catch (err) {
+        presetsEl.innerHTML = `<li>Error: ${err.message}</li>`;
+        goHomeBtn.disabled = true;
       }
     }
 
     profileSelectEl.addEventListener('change', () => {
       selectedProfileToken = profileSelectEl.value || null;
       updateActiveTokenLabel();
+      loadPresets();
     });
     loadProfiles();
 
@@ -121,7 +152,8 @@
           if (btn.dataset.stop) {
             await postJson('/api/onvif/stop', { profile_token: selectedProfileToken });
           } else if (btn.dataset.preset) {
-            await postJson('/api/onvif/goto-preset', { preset_token: btn.dataset.preset, profile_token: selectedProfileToken });
+            if (!selectedPresetToken) throw new Error('No preset token available for this profile');
+            await postJson('/api/onvif/goto-preset', { preset_token: selectedPresetToken, profile_token: selectedProfileToken });
           } else {
             await postJson('/api/onvif/move', {
               x: Number(btn.dataset.x || 0),

@@ -2,7 +2,7 @@ use std::{env, net::Ipv6Addr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -86,16 +86,29 @@ struct OnvifProfilesResponse {
     profiles: Vec<OnvifProfile>,
 }
 
+#[derive(Serialize)]
+struct OnvifPreset {
+    token: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct OnvifPresetsResponse {
+    ptz_url: String,
+    profile_token: String,
+    presets: Vec<OnvifPreset>,
+}
+
+#[derive(Deserialize)]
+struct PresetsQuery {
+    profile_token: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct MoveRequest {
     x: f32,
     y: f32,
     zoom: Option<f32>,
-    profile_token: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct StopRequest {
     profile_token: Option<String>,
 }
 
@@ -126,8 +139,8 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/onvif/profiles", get(onvif_profiles))
+        .route("/api/onvif/presets", get(onvif_presets))
         .route("/api/onvif/move", post(onvif_move))
-        .route("/api/onvif/stop", post(onvif_stop))
         .route("/api/onvif/goto-preset", post(onvif_goto_preset))
         .with_state(app_state);
 
@@ -205,26 +218,30 @@ async fn onvif_move(
     Ok("move sent")
 }
 
-async fn onvif_stop(
+async fn onvif_presets(
     State(state): State<AppState>,
-    Json(payload): Json<StopRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let profile = profile_token_or_err(&state, payload.profile_token.as_deref())?;
+    Query(query): Query<PresetsQuery>,
+) -> Result<Json<OnvifPresetsResponse>, (StatusCode, String)> {
+    let profile = profile_token_or_err(&state, query.profile_token.as_deref())?;
     let soap = format!(
         r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
   <s:Body>
-    <tptz:Stop>
+    <tptz:GetPresets>
       <tptz:ProfileToken>{profile}</tptz:ProfileToken>
-      <tptz:PanTilt>true</tptz:PanTilt>
-      <tptz:Zoom>true</tptz:Zoom>
-    </tptz:Stop>
+    </tptz:GetPresets>
   </s:Body>
 </s:Envelope>"#,
         profile = profile,
     );
 
-    send_onvif_soap_raw_to(&state, &soap, &state.cfg.onvif_ptz_url).await?;
-    Ok("stop sent")
+    let response = send_onvif_soap_raw_to(&state, &soap, &state.cfg.onvif_ptz_url).await?;
+    let presets = parse_presets_response(&response)?;
+
+    Ok(Json(OnvifPresetsResponse {
+        ptz_url: state.cfg.onvif_ptz_url.clone(),
+        profile_token: profile.to_string(),
+        presets,
+    }))
 }
 
 async fn onvif_goto_preset(
@@ -377,6 +394,36 @@ fn parse_profiles_response(xml: &str) -> Result<Vec<OnvifProfile>, (StatusCode, 
     }
 
     Ok(profiles)
+}
+
+fn parse_presets_response(xml: &str) -> Result<Vec<OnvifPreset>, (StatusCode, String)> {
+    let doc = roxmltree::Document::parse(xml).map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("failed to parse ONVIF presets XML: {e}"),
+        )
+    })?;
+
+    let mut presets = Vec::new();
+    for node in doc
+        .descendants()
+        .filter(|n| n.tag_name().name() == "Preset")
+    {
+        let token = node.attribute("token").unwrap_or("").trim().to_string();
+        if token.is_empty() {
+            continue;
+        }
+        let name = node
+            .descendants()
+            .find(|n| n.tag_name().name() == "Name")
+            .and_then(|n| n.text())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        presets.push(OnvifPreset { token, name });
+    }
+
+    Ok(presets)
 }
 
 fn rewrite_onvif_service_to_device(url: &str) -> String {
