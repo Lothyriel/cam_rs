@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{env, net::Ipv6Addr, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -21,7 +21,6 @@ struct AppState {
 
 #[derive(Clone)]
 struct Config {
-    bind_addr: String,
     web_password: String,
     webrtc_url: String,
     onvif_username: String,
@@ -40,7 +39,6 @@ enum OnvifAuthMode {
 
 impl Config {
     fn from_env() -> Result<Self, String> {
-        let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
         let web_password =
             env::var("WEB_PASSWORD").map_err(|_| "WEB_PASSWORD is required".to_string())?;
         let webrtc_url =
@@ -67,7 +65,6 @@ impl Config {
         };
 
         Ok(Self {
-            bind_addr,
             web_password,
             webrtc_url,
             onvif_media_url: rewrite_onvif_device_to_service(&onvif_url),
@@ -138,15 +135,12 @@ async fn main() {
         .route("/api/onvif/goto-preset", post(onvif_goto_preset))
         .with_state(app_state);
 
-    let addr: SocketAddr = cfg
-        .bind_addr
-        .parse()
-        .expect("BIND_ADDR must be in host:port format");
+    let addr = (Ipv6Addr::UNSPECIFIED, 3000);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind");
 
-    println!("Listening on http://{addr}");
+    println!("Listening on http://{addr:?}");
     axum::serve(listener, app).await.expect("server error");
 }
 
@@ -192,7 +186,6 @@ async fn onvif_move(
     let profile = profile_token_or_err(&state, payload.profile_token.as_deref())?;
     let zoom = payload.zoom.unwrap_or(0.0);
 
-    // Use RelativeMove only (this is what works reliably on this camera).
     let soap = format!(
         r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
   <s:Body>
