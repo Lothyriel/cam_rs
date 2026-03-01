@@ -8,7 +8,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::Engine;
-use rand::RngCore;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -353,7 +353,7 @@ fn add_wsse_header(envelope: &str, username: &str, password: &str) -> Result<Str
         .map_err(|e| format!("failed to format wsse created timestamp: {e}"))?;
 
     let mut nonce_raw = [0u8; 20];
-    rand::rngs::OsRng.fill_bytes(&mut nonce_raw);
+    rand::rng().fill(&mut nonce_raw);
     let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(nonce_raw);
 
     let mut hasher = Sha1::new();
