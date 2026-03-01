@@ -1,0 +1,12 @@
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"
+
+streams:
+  cam:
+    - ${RTSP_URL}
