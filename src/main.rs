@@ -45,7 +45,6 @@ impl Config {
             env::var("ONVIF_USERNAME").map_err(|_| "ONVIF_USERNAME is required".to_string())?;
         let onvif_password =
             env::var("ONVIF_PASSWORD").map_err(|_| "ONVIF_PASSWORD is required".to_string())?;
-        let onvif_profile_token = env::var("ONVIF_PROFILE_TOKEN").ok();
 
         let onvif_auth_mode = match env::var("ONVIF_AUTH_MODE")
             .unwrap_or_else(|_| "wsse".to_string())
@@ -67,7 +66,7 @@ impl Config {
             onvif_ptz_url: rewrite_onvif_service_to_device(&onvif_url),
             onvif_username,
             onvif_password,
-            onvif_profile_token,
+            onvif_profile_token: None,
             onvif_auth_mode,
         })
     }
@@ -154,13 +153,13 @@ async fn main() {
 }
 
 async fn index(State(state): State<AppState>) -> Html<String> {
-    let webrtc_url =
-        serde_json::to_string(&state.cfg.webrtc_url).unwrap_or_else(|_| "\"\"".to_string());
     let configured = serde_json::to_string(&state.cfg.onvif_profile_token)
         .unwrap_or_else(|_| "null".to_string());
 
+    let url = serde_json::to_string(&state.cfg.webrtc_url).unwrap_or_else(|_| "null".to_string());
+
     let html = HTML_TEMPLATE
-        .replace("__WEBRTC_URL__", &webrtc_url)
+        .replace("__WEBRTC_URL__", &url)
         .replace("__CONFIGURED_PROFILE_TOKEN__", &configured);
 
     Html(html)

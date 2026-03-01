@@ -1,88 +1,313 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Camera Control</title>
+  <title>Camera Console</title>
   <style>
-    body { margin: 0; padding: 20px; font-family: system-ui, sans-serif; background: #0b1220; color: #e5e7eb; }
-    .container { max-width: 980px; margin: 0 auto; display: grid; gap: 16px; }
-    .card { background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 14px; }
-    .video-wrap { aspect-ratio: 16 / 9; width: 100%; border: 1px solid #334155; border-radius: 10px; overflow: hidden; background: #020617; }
-    .video-wrap iframe { width: 100%; height: 100%; border: 0; }
-    .controls { display: grid; grid-template-columns: repeat(3, minmax(80px, 1fr)); gap: 8px; max-width: 340px; }
-    button, select { background: #0b1220; color: #e5e7eb; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; }
-    ul { padding-left: 20px; margin: 8px 0 0; font-family: ui-monospace, monospace; }
-    #status { font-family: ui-monospace, monospace; min-height: 1.2em; margin-top: 10px; }
+    :root {
+      --bg: #f4f7fb;
+      --ink: #0f172a;
+      --muted: #475569;
+      --card: #ffffff;
+      --line: #dbe4f0;
+      --accent: #0ea5a4;
+      --accent-ink: #083344;
+      --danger: #b91c1c;
+      --ok: #14532d;
+      --radius: 14px;
+      --shadow: 0 10px 28px rgba(2, 6, 23, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 10%, #dff6ff 0%, transparent 36%),
+        radial-gradient(circle at 88% 90%, #d9fbe8 0%, transparent 34%),
+        var(--bg);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .shell {
+      max-width: 1500px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: 1fr;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #fcfdff 0%, #f8fbff 100%);
+    }
+
+    .card-head h2 {
+      margin: 0;
+      font-size: 1rem;
+      letter-spacing: 0.02em;
+    }
+
+    .chip {
+      border: 1px solid #bce7e7;
+      color: var(--accent-ink);
+      background: #ecfeff;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      padding: 4px 10px;
+      font-weight: 600;
+    }
+
+    .card-body {
+      padding: 14px 16px;
+    }
+
+    .video-wrap {
+      width: 100%;
+      aspect-ratio: 16 / 6.5;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      background: #020617;
+    }
+
+    .video-wrap iframe {
+      width: 100%;
+      height: 100%;
+      border: 0;
+    }
+
+    .select-wrap {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .select-wrap label {
+      font-weight: 600;
+      font-size: 0.86rem;
+      color: #1e293b;
+    }
+
+    select,
+    button {
+      font: inherit;
+      border-radius: 10px;
+      border: 1px solid #c9d6e5;
+      background: #ffffff;
+      color: var(--ink);
+      transition: border-color 120ms ease, transform 80ms ease;
+    }
+
+    select {
+      width: 100%;
+      padding: 9px 11px;
+    }
+
+    button {
+      min-height: 52px;
+      font-size: 1.1rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:hover:not(:disabled) {
+      border-color: #7dd3d3;
+    }
+
+    button:active:not(:disabled) {
+      transform: translateY(1px);
+    }
+
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .dpad {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(64px, 1fr));
+      gap: 8px;
+      max-width: 320px;
+      margin-bottom: 12px;
+    }
+
+    .dpad .ghost {
+      visibility: hidden;
+      pointer-events: none;
+      border-color: transparent;
+      background: transparent;
+    }
+
+    .home {
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      background: #f8fafc;
+    }
+
+    .lists {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr;
+    }
+
+    .list-block h3 {
+      margin: 0 0 6px;
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #334155;
+    }
+
+    ul {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.83rem;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      max-height: 170px;
+      overflow: auto;
+      background: #fbfdff;
+    }
+
+    li {
+      padding: 8px 10px;
+      border-top: 1px solid #e9eff7;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      overflow: hidden;
+    }
+
+    li:first-child {
+      border-top: 0;
+    }
+
+    #status {
+      margin-top: 12px;
+      min-height: 1.2em;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.86rem;
+      color: var(--ok);
+    }
+
+    #status.error {
+      color: var(--danger);
+    }
+
+    @media (max-width: 920px) {
+      .video-wrap { aspect-ratio: 16 / 10; }
+    }
   </style>
 </head>
+
 <body>
-  <div class="container">
-    <div class="card">
-      <h2>WebRTC Video</h2>
-      <div class="video-wrap">
-        <iframe id="webrtc-frame" allow="autoplay; fullscreen; picture-in-picture"></iframe>
+  <main class="shell">
+    <section class="card">
+      <div class="card-head">
+        <h2>Live Video</h2>
+        <span class="chip">WebRTC</span>
       </div>
-    </div>
-    <div class="card">
-      <h2>ONVIF PTZ Controls</h2>
-      <div id="configured-token"></div>
-      <div id="active-token"></div>
-      <select id="profile-select"></select>
-      <ul id="profiles"></ul>
-      <ul id="presets"></ul>
-      <div class="controls" id="ptz-controls">
-        <button data-x="0" data-y="-0.6">Up</button>
-        <button data-x="-0.6" data-y="0">Left</button>
-        <button data-preset="1" disabled>Go Home</button>
-        <button data-x="0.6" data-y="0">Right</button>
-        <button data-x="0" data-y="0.6">Down</button>
+      <div class="card-body">
+        <div class="video-wrap">
+          <iframe id="webrtc-frame" allow="autoplay; fullscreen; picture-in-picture"></iframe>
+        </div>
       </div>
-      <div id="status"></div>
-    </div>
-  </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>PTZ Control</h2>
+        <span class="chip">ONVIF</span>
+      </div>
+      <div class="card-body">
+        <div class="select-wrap">
+          <label for="profile-select">Profile</label>
+          <select id="profile-select"></select>
+        </div>
+
+        <div class="dpad" id="ptz-controls">
+          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
+          <button data-x="0" data-y="-0.25" aria-label="Move up">↑</button>
+          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
+
+          <button data-x="-0.25" data-y="0" aria-label="Move left">←</button>
+          <button class="home" data-preset="1" disabled aria-label="Go home">Home</button>
+          <button data-x="0.25" data-y="0" aria-label="Move right">→</button>
+
+          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
+          <button data-x="0" data-y="0.25" aria-label="Move down">↓</button>
+          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
+        </div>
+
+        <div class="lists">
+          <div class="list-block">
+            <h3>Presets</h3>
+            <ul id="presets"></ul>
+          </div>
+        </div>
+
+        <div id="status"></div>
+      </div>
+    </section>
+  </main>
 
   <script>
     const WEBRTC_URL = __WEBRTC_URL__;
     const CONFIGURED_PROFILE_TOKEN = __CONFIGURED_PROFILE_TOKEN__;
 
     const statusEl = document.getElementById('status');
-    const profilesEl = document.getElementById('profiles');
     const presetsEl = document.getElementById('presets');
-    const configuredTokenEl = document.getElementById('configured-token');
-    const activeTokenEl = document.getElementById('active-token');
     const profileSelectEl = document.getElementById('profile-select');
     const goHomeBtn = document.querySelector('button[data-preset]');
 
     let selectedProfileToken = CONFIGURED_PROFILE_TOKEN || null;
     let selectedPresetToken = null;
+
     const webrtcFrame = document.getElementById('webrtc-frame');
     webrtcFrame.src = WEBRTC_URL;
-    configuredTokenEl.textContent = CONFIGURED_PROFILE_TOKEN
-      ? `Configured profile token: ${CONFIGURED_PROFILE_TOKEN}`
-      : 'Configured profile token: (not set)';
 
-    function updateActiveTokenLabel() {
-      activeTokenEl.textContent = selectedProfileToken
-        ? `Active profile token: ${selectedProfileToken}`
-        : 'Active profile token: (none)';
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.classList.toggle('error', isError);
     }
-    updateActiveTokenLabel();
 
     async function postJson(url, body) {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(body || {})
       });
       const text = await res.text();
       if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
-      statusEl.textContent = text || 'OK';
+      setStatus(text || 'OK');
     }
 
     async function loadProfiles() {
       try {
-        profilesEl.innerHTML = '';
         const res = await fetch('/api/onvif/profiles');
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || JSON.stringify(data));
@@ -93,20 +318,15 @@
           opt.value = p.token;
           opt.textContent = `${p.token} - ${p.name || '(no name)'}`;
           profileSelectEl.appendChild(opt);
-
-          const li = document.createElement('li');
-          li.textContent = `${p.token} - ${p.name || '(no name)'}`;
-          profilesEl.appendChild(li);
         }
 
         if (selectedProfileToken) profileSelectEl.value = selectedProfileToken;
         if (!profileSelectEl.value && profileSelectEl.options.length) profileSelectEl.selectedIndex = 0;
         selectedProfileToken = profileSelectEl.value || selectedProfileToken || null;
-        updateActiveTokenLabel();
         await loadPresets();
       } catch (err) {
-        profilesEl.innerHTML = `<li>Error: ${err.message}</li>`;
         goHomeBtn.disabled = true;
+        setStatus(`Error: ${err.message}`, true);
       }
     }
 
@@ -115,9 +335,7 @@
         selectedPresetToken = null;
         goHomeBtn.disabled = true;
         presetsEl.innerHTML = '';
-        if (!selectedProfileToken) {
-          return;
-        }
+        if (!selectedProfileToken) return;
 
         const res = await fetch(`/api/onvif/presets?profile_token=${encodeURIComponent(selectedProfileToken)}`);
         const data = await res.json();
@@ -136,37 +354,43 @@
       } catch (err) {
         presetsEl.innerHTML = `<li>Error: ${err.message}</li>`;
         goHomeBtn.disabled = true;
+        setStatus(`Error: ${err.message}`, true);
       }
     }
 
     profileSelectEl.addEventListener('change', () => {
       selectedProfileToken = profileSelectEl.value || null;
-      updateActiveTokenLabel();
       loadPresets();
     });
+
     loadProfiles();
 
     document.querySelectorAll('#ptz-controls button').forEach(btn => {
+      if (btn.classList.contains('ghost')) return;
+
       btn.addEventListener('click', async () => {
         try {
-          if (btn.dataset.stop) {
-            await postJson('/api/onvif/stop', { profile_token: selectedProfileToken });
-          } else if (btn.dataset.preset) {
+          if (btn.dataset.preset) {
             if (!selectedPresetToken) throw new Error('No preset token available for this profile');
-            await postJson('/api/onvif/goto-preset', { preset_token: selectedPresetToken, profile_token: selectedProfileToken });
-          } else {
-            await postJson('/api/onvif/move', {
-              x: Number(btn.dataset.x || 0),
-              y: Number(btn.dataset.y || 0),
-              zoom: Number(btn.dataset.z || 0),
+            await postJson('/api/onvif/goto-preset', {
+              preset_token: selectedPresetToken,
               profile_token: selectedProfileToken,
             });
+            return;
           }
+
+          await postJson('/api/onvif/move', {
+            x: Number(btn.dataset.x || 0),
+            y: Number(btn.dataset.y || 0),
+            zoom: Number(btn.dataset.z || 0),
+            profile_token: selectedProfileToken,
+          });
         } catch (err) {
-          statusEl.textContent = `Error: ${err.message}`;
+          setStatus(`Error: ${err.message}`, true);
         }
       });
     });
   </script>
 </body>
+
 </html>
