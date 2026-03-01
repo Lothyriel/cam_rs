@@ -9,17 +9,25 @@
     .container { max-width: 980px; margin: 0 auto; display: grid; gap: 16px; }
     .card { background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 14px; }
     .password { color: #22c55e; font-family: ui-monospace, monospace; }
-    video { width: 100%; border: 1px solid #334155; border-radius: 8px; background: #000; min-height: 240px; }
+    .video-wrap { aspect-ratio: 16 / 9; width: 100%; border: 1px solid #334155; border-radius: 10px; overflow: hidden; background: #020617; }
+    .video-wrap iframe { width: 100%; height: 100%; border: 0; }
     .controls { display: grid; grid-template-columns: repeat(3, minmax(80px, 1fr)); gap: 8px; max-width: 340px; }
     button, select { background: #0b1220; color: #e5e7eb; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; }
     ul { padding-left: 20px; margin: 8px 0 0; font-family: ui-monospace, monospace; }
     #status { font-family: ui-monospace, monospace; min-height: 1.2em; margin-top: 10px; }
+    #video-status { font-family: ui-monospace, monospace; min-height: 1.2em; margin-top: 10px; }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="card"><h2>Web Password</h2><div class="password" id="pwd"></div></div>
-    <div class="card"><h2>RTSP Stream (HLS)</h2><video id="cam" controls autoplay muted playsinline></video><div id="video-status"></div></div>
+    <div class="card">
+      <h2>WebRTC Video</h2>
+      <div class="video-wrap">
+        <iframe id="webrtc-frame" allow="autoplay; fullscreen; picture-in-picture"></iframe>
+      </div>
+      <div id="video-status"></div>
+    </div>
     <div class="card">
       <h2>ONVIF PTZ Controls</h2>
       <div id="configured-token"></div>
@@ -40,13 +48,13 @@
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
   <script>
     const WEB_PASSWORD = __WEB_PASSWORD__;
+    const WEBRTC_URL = __WEBRTC_URL__;
     const CONFIGURED_PROFILE_TOKEN = __CONFIGURED_PROFILE_TOKEN__;
 
-    const statusEl = document.getElementById('status');
     const videoStatusEl = document.getElementById('video-status');
+    const statusEl = document.getElementById('status');
     const profilesEl = document.getElementById('profiles');
     const configuredTokenEl = document.getElementById('configured-token');
     const activeTokenEl = document.getElementById('active-token');
@@ -54,6 +62,9 @@
 
     let selectedProfileToken = CONFIGURED_PROFILE_TOKEN || null;
     document.getElementById('pwd').textContent = WEB_PASSWORD;
+    const webrtcFrame = document.getElementById('webrtc-frame');
+    webrtcFrame.src = WEBRTC_URL;
+    videoStatusEl.textContent = `WebRTC source: ${WEBRTC_URL}`;
     configuredTokenEl.textContent = CONFIGURED_PROFILE_TOKEN
       ? `Configured profile token: ${CONFIGURED_PROFILE_TOKEN}`
       : 'Configured profile token: (not set)';
@@ -64,20 +75,6 @@
         : 'Active profile token: (none)';
     }
     updateActiveTokenLabel();
-
-    const video = document.getElementById('cam');
-    const streamUrl = '/hls/stream.m3u8';
-    if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = streamUrl;
-      videoStatusEl.textContent = 'Using native HLS playback';
-    } else if (window.Hls && Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 2, maxBufferLength: 4 });
-      hls.loadSource(streamUrl);
-      hls.attachMedia(video);
-      videoStatusEl.textContent = 'Using hls.js playback';
-    } else {
-      videoStatusEl.textContent = 'HLS playback unsupported in this browser';
-    }
 
     async function postJson(url, body) {
       const res = await fetch(url, {
@@ -136,7 +133,6 @@
               x: Number(btn.dataset.x || 0),
               y: Number(btn.dataset.y || 0),
               zoom: Number(btn.dataset.z || 0),
-              timeout_ms: 500,
               profile_token: selectedProfileToken,
             });
           }

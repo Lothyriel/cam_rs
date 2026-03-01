@@ -1,4 +1,4 @@
-use std::{env, fs, net::SocketAddr, path::Path, sync::Arc};
+use std::{env, net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -12,8 +12,6 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::process::Command;
-use tower_http::services::ServeDir;
 
 #[derive(Clone)]
 struct AppState {
@@ -24,37 +22,36 @@ struct AppState {
 #[derive(Clone)]
 struct Config {
     bind_addr: String,
-    rtsp_url: String,
     web_password: String,
-    onvif_url: String,
+    webrtc_url: String,
     onvif_username: String,
     onvif_password: String,
     onvif_profile_token: Option<String>,
     onvif_auth_mode: OnvifAuthMode,
     onvif_media_url: String,
     onvif_ptz_url: String,
-    hls_dir: String,
 }
 
 #[derive(Clone, Copy)]
 enum OnvifAuthMode {
     Basic,
     Wsse,
-    Auto,
 }
 
 impl Config {
     fn from_env() -> Result<Self, String> {
         let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
-        let rtsp_url = env::var("RTSP_URL").map_err(|_| "RTSP_URL is required".to_string())?;
         let web_password =
             env::var("WEB_PASSWORD").map_err(|_| "WEB_PASSWORD is required".to_string())?;
+        let webrtc_url =
+            env::var("WEBRTC_URL").map_err(|_| "WEBRTC_URL is required".to_string())?;
         let onvif_url = env::var("ONVIF_URL").map_err(|_| "ONVIF_URL is required".to_string())?;
         let onvif_username =
             env::var("ONVIF_USERNAME").map_err(|_| "ONVIF_USERNAME is required".to_string())?;
         let onvif_password =
             env::var("ONVIF_PASSWORD").map_err(|_| "ONVIF_PASSWORD is required".to_string())?;
         let onvif_profile_token = env::var("ONVIF_PROFILE_TOKEN").ok();
+
         let onvif_auth_mode = match env::var("ONVIF_AUTH_MODE")
             .unwrap_or_else(|_| "wsse".to_string())
             .to_lowercase()
@@ -62,29 +59,23 @@ impl Config {
         {
             "basic" => OnvifAuthMode::Basic,
             "wsse" => OnvifAuthMode::Wsse,
-            "auto" => OnvifAuthMode::Auto,
             other => {
                 return Err(format!(
-                    "ONVIF_AUTH_MODE must be one of basic|wsse|auto, got: {other}"
+                    "ONVIF_AUTH_MODE must be one of basic|wsse, got: {other}"
                 ));
             }
         };
-        let onvif_media_url = rewrite_onvif_device_to_service(&onvif_url);
-        let onvif_ptz_url = rewrite_onvif_service_to_device(&onvif_url);
-        let hls_dir = env::var("HLS_DIR").unwrap_or_else(|_| "hls".to_string());
 
         Ok(Self {
             bind_addr,
-            rtsp_url,
             web_password,
-            onvif_url,
+            webrtc_url,
+            onvif_media_url: rewrite_onvif_device_to_service(&onvif_url),
+            onvif_ptz_url: rewrite_onvif_service_to_device(&onvif_url),
             onvif_username,
             onvif_password,
             onvif_profile_token,
             onvif_auth_mode,
-            onvif_media_url,
-            onvif_ptz_url,
-            hls_dir,
         })
     }
 }
@@ -107,7 +98,6 @@ struct MoveRequest {
     x: f32,
     y: f32,
     zoom: Option<f32>,
-    timeout_ms: Option<u64>,
     profile_token: Option<String>,
 }
 
@@ -131,11 +121,6 @@ async fn main() {
         std::process::exit(1);
     });
 
-    if let Err(e) = start_hls_pipeline(&cfg).await {
-        eprintln!("Failed to start HLS pipeline: {e}");
-        std::process::exit(1);
-    }
-
     let client = reqwest::Client::builder()
         .build()
         .expect("failed to create HTTP client");
@@ -147,7 +132,6 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(index))
-        .nest_service("/hls", ServeDir::new(cfg.hls_dir.clone()))
         .route("/api/onvif/profiles", get(onvif_profiles))
         .route("/api/onvif/move", post(onvif_move))
         .route("/api/onvif/stop", post(onvif_stop))
@@ -166,86 +150,17 @@ async fn main() {
     axum::serve(listener, app).await.expect("server error");
 }
 
-async fn start_hls_pipeline(cfg: &Config) -> Result<(), String> {
-    let hls_path = Path::new(&cfg.hls_dir);
-    fs::create_dir_all(hls_path)
-        .map_err(|e| format!("failed to create HLS dir {}: {e}", cfg.hls_dir))?;
-
-    for entry in fs::read_dir(hls_path)
-        .map_err(|e| format!("failed to read HLS dir {}: {e}", cfg.hls_dir))?
-    {
-        let entry = entry.map_err(|e| format!("failed to read HLS dir entry: {e}"))?;
-        if entry
-            .file_type()
-            .map_err(|e| format!("failed to read file type: {e}"))?
-            .is_file()
-        {
-            let p = entry.path();
-            let ext = p.extension().and_then(|v| v.to_str()).unwrap_or_default();
-            if matches!(ext, "m3u8" | "ts" | "m4s" | "tmp" | "mp4") {
-                let _ = fs::remove_file(&p);
-            }
-        }
-    }
-
-    let playlist_path = hls_path.join("stream.m3u8");
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-fflags",
-        "+genpts+discardcorrupt",
-        "-use_wallclock_as_timestamps",
-        "1",
-        "-avoid_negative_ts",
-        "make_zero",
-        "-rtsp_transport",
-        "tcp",
-        "-i",
-        &cfg.rtsp_url,
-        "-an",
-        "-c:v",
-        "copy",
-        "-f",
-        "hls",
-        "-hls_time",
-        "1",
-        "-hls_list_size",
-        "6",
-        "-hls_flags",
-        "delete_segments+append_list+independent_segments+omit_endlist",
-        "-hls_segment_type",
-        "mpegts",
-        playlist_path
-            .to_str()
-            .ok_or_else(|| "invalid HLS playlist path".to_string())?,
-    ])
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::inherit());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to start ffmpeg: {e}"))?;
-
-    tokio::spawn(async move {
-        match child.wait().await {
-            Ok(status) => eprintln!("HLS ffmpeg process exited: {status}"),
-            Err(e) => eprintln!("Failed waiting for HLS ffmpeg process: {e}"),
-        }
-    });
-
-    Ok(())
-}
-
 async fn index(State(state): State<AppState>) -> Html<String> {
     let pass =
         serde_json::to_string(&state.cfg.web_password).unwrap_or_else(|_| "\"\"".to_string());
+    let webrtc_url =
+        serde_json::to_string(&state.cfg.webrtc_url).unwrap_or_else(|_| "\"\"".to_string());
     let configured = serde_json::to_string(&state.cfg.onvif_profile_token)
         .unwrap_or_else(|_| "null".to_string());
 
     let html = HTML_TEMPLATE
         .replace("__WEB_PASSWORD__", &pass)
+        .replace("__WEBRTC_URL__", &webrtc_url)
         .replace("__CONFIGURED_PROFILE_TOKEN__", &configured);
 
     Html(html)
@@ -260,35 +175,11 @@ async fn onvif_profiles(
   </s:Body>
 </s:Envelope>"#;
 
-    let candidates = media_url_candidates(&state).await;
-    let mut last_err = String::new();
-    let mut chosen_url = String::new();
-    let mut profiles = Vec::new();
-
-    for media_url in candidates {
-        match send_onvif_soap_raw_to(&state, soap, &media_url).await {
-            Ok(response) => match parse_profiles_response(&response) {
-                Ok(p) => {
-                    chosen_url = media_url;
-                    profiles = p;
-                    break;
-                }
-                Err((_, e)) => {
-                    last_err = format!("parse failed via {media_url}: {e}");
-                }
-            },
-            Err((_, e)) => {
-                last_err = format!("request failed via {media_url}: {e}");
-            }
-        }
-    }
-
-    if chosen_url.is_empty() {
-        return Err((StatusCode::BAD_GATEWAY, last_err));
-    }
+    let response = send_onvif_soap_raw_to(&state, soap, &state.cfg.onvif_media_url).await?;
+    let profiles = parse_profiles_response(&response)?;
 
     Ok(Json(OnvifProfilesResponse {
-        media_url: chosen_url,
+        media_url: state.cfg.onvif_media_url.clone(),
         configured_profile_token: state.cfg.onvif_profile_token.clone(),
         profiles,
     }))
@@ -299,35 +190,11 @@ async fn onvif_move(
     Json(payload): Json<MoveRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let profile = profile_token_or_err(&state, payload.profile_token.as_deref())?;
-    let timeout = payload.timeout_ms.unwrap_or(400);
     let zoom = payload.zoom.unwrap_or(0.0);
 
-    let continuous = format!(
+    // Use RelativeMove only (this is what works reliably on this camera).
+    let soap = format!(
         r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
-  <s:Body>
-    <tptz:ContinuousMove>
-      <tptz:ProfileToken>{profile}</tptz:ProfileToken>
-      <tptz:Velocity>
-        <tt:PanTilt x="{x}" y="{y}" />
-        <tt:Zoom x="{zoom}" />
-      </tptz:Velocity>
-      <tptz:Timeout>PT{secs}.{ms:03}S</tptz:Timeout>
-    </tptz:ContinuousMove>
-  </s:Body>
-</s:Envelope>"#,
-        profile = profile,
-        x = payload.x,
-        y = payload.y,
-        zoom = zoom,
-        secs = timeout / 1000,
-        ms = timeout % 1000
-    );
-
-    match send_onvif_ptz_with_fallback(&state, continuous).await {
-        Ok(()) => Ok("move sent"),
-        Err((_, cont_err)) => {
-            let relative = format!(
-                r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
   <s:Body>
     <tptz:RelativeMove>
       <tptz:ProfileToken>{profile}</tptz:ProfileToken>
@@ -342,24 +209,14 @@ async fn onvif_move(
     </tptz:RelativeMove>
   </s:Body>
 </s:Envelope>"#,
-                profile = profile,
-                x = payload.x,
-                y = payload.y,
-                zoom = zoom,
-            );
-            send_onvif_ptz_with_fallback(&state, relative)
-                .await
-                .map_err(|(_, rel_err)| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        format!(
-                            "ContinuousMove failed: {cont_err}; RelativeMove failed: {rel_err}"
-                        ),
-                    )
-                })?;
-            Ok("move sent (relative)")
-        }
-    }
+        profile = profile,
+        x = payload.x,
+        y = payload.y,
+        zoom = zoom,
+    );
+
+    send_onvif_soap_raw_to(&state, &soap, &state.cfg.onvif_ptz_url).await?;
+    Ok("move sent")
 }
 
 async fn onvif_stop(
@@ -379,7 +236,8 @@ async fn onvif_stop(
 </s:Envelope>"#,
         profile = profile,
     );
-    send_onvif_ptz_with_fallback(&state, soap).await?;
+
+    send_onvif_soap_raw_to(&state, &soap, &state.cfg.onvif_ptz_url).await?;
     Ok("stop sent")
 }
 
@@ -400,35 +258,9 @@ async fn onvif_goto_preset(
         profile = profile,
         preset = payload.preset_token,
     );
-    send_onvif_ptz_with_fallback(&state, soap).await?;
+
+    send_onvif_soap_raw_to(&state, &soap, &state.cfg.onvif_ptz_url).await?;
     Ok("goto preset sent")
-}
-
-async fn send_onvif_ptz_with_fallback(
-    state: &AppState,
-    body: String,
-) -> Result<(), (StatusCode, String)> {
-    let mut candidates = Vec::new();
-    if let Ok(ptz_url) = discover_ptz_url(state).await {
-        candidates.push(ptz_url);
-    }
-    candidates.push(state.cfg.onvif_url.clone());
-    candidates.push(rewrite_onvif_service_to_device(&state.cfg.onvif_url));
-    candidates.sort();
-    candidates.dedup();
-
-    let mut errors = Vec::new();
-    for url in candidates {
-        match send_onvif_soap_raw_to(state, &body, &url).await {
-            Ok(_) => return Ok(()),
-            Err((_, err)) => errors.push(format!("{url} -> {err}")),
-        }
-    }
-
-    Err((
-        StatusCode::BAD_GATEWAY,
-        format!("all PTZ endpoint attempts failed: {}", errors.join(" | ")),
-    ))
 }
 
 async fn send_onvif_soap_raw_to(
@@ -436,25 +268,9 @@ async fn send_onvif_soap_raw_to(
     body: &str,
     url: &str,
 ) -> Result<String, (StatusCode, String)> {
-    let result = match state.cfg.onvif_auth_mode {
-        OnvifAuthMode::Basic => send_onvif_once(state, body, OnvifAuthMode::Basic, url).await,
-        OnvifAuthMode::Wsse => send_onvif_once(state, body, OnvifAuthMode::Wsse, url).await,
-        OnvifAuthMode::Auto => {
-            match send_onvif_once(state, body, OnvifAuthMode::Basic, url).await {
-                Ok(text) => Ok(text),
-                Err(basic_err) => {
-                    match send_onvif_once(state, body, OnvifAuthMode::Wsse, url).await {
-                        Ok(text) => Ok(text),
-                        Err(wsse_err) => Err(format!(
-                            "basic auth failed: {basic_err}; wsse auth failed: {wsse_err}"
-                        )),
-                    }
-                }
-            }
-        }
-    };
-
-    result.map_err(|e| (StatusCode::BAD_GATEWAY, e))
+    send_onvif_once(state, body, state.cfg.onvif_auth_mode, url)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))
 }
 
 async fn send_onvif_once(
@@ -471,7 +287,7 @@ async fn send_onvif_once(
         .header("Content-Type", "application/soap+xml; charset=utf-8");
 
     let final_body = match mode {
-        OnvifAuthMode::Basic | OnvifAuthMode::Auto => {
+        OnvifAuthMode::Basic => {
             let auth = format!("{}:{}", state.cfg.onvif_username, state.cfg.onvif_password);
             let auth = base64::engine::general_purpose::STANDARD.encode(auth);
             request = request.header("Authorization", format!("Basic {auth}"));
@@ -547,52 +363,6 @@ fn profile_token_or_err<'a>(
         })
 }
 
-async fn discover_media_url(state: &AppState) -> Result<String, (StatusCode, String)> {
-    if !state.cfg.onvif_media_url.is_empty() {
-        return Ok(state.cfg.onvif_media_url.clone());
-    }
-    let response = get_capabilities_response(state).await?;
-    Ok(parse_capability_xaddr(&response, "Media").unwrap_or_else(|| state.cfg.onvif_url.clone()))
-}
-
-async fn discover_ptz_url(state: &AppState) -> Result<String, (StatusCode, String)> {
-    if !state.cfg.onvif_ptz_url.is_empty() {
-        return Ok(state.cfg.onvif_ptz_url.clone());
-    }
-    let response = get_capabilities_response(state).await?;
-    Ok(parse_capability_xaddr(&response, "PTZ")
-        .map(|u| rewrite_onvif_service_to_device(&u))
-        .unwrap_or_else(|| rewrite_onvif_service_to_device(&state.cfg.onvif_url)))
-}
-
-async fn get_capabilities_response(state: &AppState) -> Result<String, (StatusCode, String)> {
-    let soap = r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
-  <s:Body>
-    <tds:GetCapabilities>
-      <tds:Category>All</tds:Category>
-    </tds:GetCapabilities>
-  </s:Body>
-</s:Envelope>"#;
-    send_onvif_soap_raw_to(state, soap, &state.cfg.onvif_url).await
-}
-
-fn parse_capability_xaddr(xml: &str, capability_name: &str) -> Option<String> {
-    let doc = roxmltree::Document::parse(xml).ok()?;
-    for capability in doc
-        .descendants()
-        .filter(|n| n.tag_name().name() == capability_name)
-    {
-        if let Some(xaddr) = capability
-            .descendants()
-            .find(|n| n.tag_name().name() == "XAddr")
-            .and_then(|n| n.text())
-        {
-            return Some(xaddr.trim().to_string());
-        }
-    }
-    None
-}
-
 fn parse_profiles_response(xml: &str) -> Result<Vec<OnvifProfile>, (StatusCode, String)> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| {
         (
@@ -643,20 +413,6 @@ fn rewrite_onvif_device_to_service(url: &str) -> String {
         );
     }
     url.to_string()
-}
-
-async fn media_url_candidates(state: &AppState) -> Vec<String> {
-    let mut out = Vec::new();
-    out.push(state.cfg.onvif_media_url.clone());
-    if let Ok(url) = discover_media_url(state).await {
-        out.push(url);
-    }
-    out.push(rewrite_onvif_device_to_service(&state.cfg.onvif_url));
-    out.push(state.cfg.onvif_url.clone());
-
-    out.sort();
-    out.dedup();
-    out
 }
 
 fn xml_escape(input: &str) -> String {
