@@ -21,6 +21,6 @@ RUN apt-get update && apt-get install --no-install-recommends -y tini ca-certifi
 WORKDIR /app
 COPY --from=builder /app/target/release/cam_rs /usr/local/bin
 
-EXPOSE 3000
+EXPOSE 5000
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["cam_rs"]

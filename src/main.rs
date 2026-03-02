@@ -93,7 +93,7 @@ async fn main() {
         .route("/api/onvif/goto-preset", post(onvif_goto_preset))
         .with_state(app_state);
 
-    let addr = (Ipv6Addr::UNSPECIFIED, 3000);
+    let addr = (Ipv6Addr::UNSPECIFIED, 5000);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind");
