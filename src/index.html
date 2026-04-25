@@ -360,6 +360,7 @@
   <script>
     const WEBRTC_URL = __WEBRTC_URL__;
     const CONFIGURED_PROFILE_TOKEN = __CONFIGURED_PROFILE_TOKEN__;
+    const AI_POLL_INTERVAL_MS = 500;
 
     const statusEl = document.getElementById('status');
     const presetsEl = document.getElementById('presets');
@@ -528,7 +529,7 @@
     pollAiState();
     window.setInterval(() => {
       pollAiState();
-    }, 500);
+    }, AI_POLL_INTERVAL_MS);
 
     goHomeBtn.addEventListener('click', async () => {
       try {

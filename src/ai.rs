@@ -17,10 +17,19 @@ use tokio::{
     time::{MissedTickBehavior, interval, sleep},
 };
 
-use crate::onvif::{
-    models::PresetRequest,
-    service::OnvifService,
-};
+use crate::onvif::{models::PresetRequest, service::OnvifService};
+
+const MIN_PTZ_INTERVAL_MS: u64 = 50;
+const MIN_ROLL_SECS: u64 = 1;
+const STACK_CAPACITY_DIVISOR: usize = 32;
+const DYNAMIC_THRESHOLD_ADJUSTMENT: u8 = 4;
+const TRACK_LOCK_DURATION: Duration = Duration::from_millis(1500);
+const TRACK_LOST_TIMEOUT: Duration = Duration::from_secs(1);
+const TRACK_SMOOTHING_CURRENT: f32 = 0.55;
+const TRACK_SMOOTHING_NEW: f32 = 0.45;
+const PTZ_STOP_THRESHOLD: f32 = 0.01;
+const PTZ_UPDATE_THRESHOLD: f32 = 0.02;
+const RECORDING_CHUNK_SIZE: usize = 16 * 1024;
 
 #[derive(Clone)]
 pub struct AiController {
@@ -192,14 +201,14 @@ impl AiConfig {
             min_blob_percent,
             motion_start_frames,
             motion_end_frames,
-            ptz_interval: Duration::from_millis(ptz_interval_ms.max(50)),
+            ptz_interval: Duration::from_millis(ptz_interval_ms.max(MIN_PTZ_INTERVAL_MS)),
             ptz_gain_x,
             ptz_gain_y,
             ptz_dead_zone,
             ptz_rate_limit,
             centered_hold: Duration::from_millis(centered_hold_ms),
-            pre_roll: Duration::from_secs(pre_roll_secs.max(1)),
-            post_roll: Duration::from_secs(post_roll_secs.max(1)),
+            pre_roll: Duration::from_secs(pre_roll_secs.max(MIN_ROLL_SECS)),
+            post_roll: Duration::from_secs(post_roll_secs.max(MIN_ROLL_SECS)),
             recordings_dir,
             home_preset_token,
         })
@@ -274,7 +283,7 @@ impl MotionDetector {
             mask: vec![0; frame_len],
             scratch: vec![0; frame_len],
             visited: vec![0; frame_len],
-            stack: Vec::with_capacity(frame_len / 32),
+            stack: Vec::with_capacity((frame_len / STACK_CAPACITY_DIVISOR).max(1)),
             motion_frames: 0,
             empty_frames: 0,
             target: None,
@@ -301,9 +310,9 @@ impl MotionDetector {
             self.mask[idx] = 0;
         }
 
-        let dynamic_threshold = self
-            .base_threshold
-            .max(((diff_sum / frame.len() as u64) as u8).saturating_add(4));
+        let dynamic_threshold = self.base_threshold.max(
+            ((diff_sum / frame.len() as u64) as u8).saturating_add(DYNAMIC_THRESHOLD_ADJUSTMENT),
+        );
 
         for (idx, pixel) in frame.iter().copied().enumerate() {
             let bg = self.background[idx] >> 8;
@@ -408,9 +417,9 @@ impl MotionDetector {
 
         let should_replace = match self.target {
             Some(current) => {
-                (now.duration_since(current.locked_at) >= Duration::from_millis(1500)
+                (now.duration_since(current.locked_at) >= TRACK_LOCK_DURATION
                     || blob.area > current.area.saturating_mul(2))
-                    || now.duration_since(current.last_seen_at) > Duration::from_secs(1)
+                    || now.duration_since(current.last_seen_at) > TRACK_LOST_TIMEOUT
             }
             None => true,
         };
@@ -426,8 +435,10 @@ impl MotionDetector {
             let current = self.target.unwrap();
             Track {
                 offset: AxisValue {
-                    x: current.offset.x * 0.55 + raw_offset.x * 0.45,
-                    y: current.offset.y * 0.55 + raw_offset.y * 0.45,
+                    x: current.offset.x * TRACK_SMOOTHING_CURRENT
+                        + raw_offset.x * TRACK_SMOOTHING_NEW,
+                    y: current.offset.y * TRACK_SMOOTHING_CURRENT
+                        + raw_offset.y * TRACK_SMOOTHING_NEW,
                 },
                 area: blob.area,
                 locked_at: current.locked_at,
@@ -573,7 +584,7 @@ async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<RwLock<AiRu
 
         if !snapshot.tracking {
             centered_since = None;
-            if last_sent.x.abs() > 0.01 || last_sent.y.abs() > 0.01 {
+            if last_sent.x.abs() > PTZ_STOP_THRESHOLD || last_sent.y.abs() > PTZ_STOP_THRESHOLD {
                 if let Err(err) = onvif
                     .stop(crate::onvif::models::StopRequest {
                         profile_token: None,
@@ -621,11 +632,13 @@ async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<RwLock<AiRu
             y: rate_limit(last_sent.y, desired.y, cfg.ptz_rate_limit),
         };
 
-        if (next.x - last_sent.x).abs() < 0.02 && (next.y - last_sent.y).abs() < 0.02 {
+        if (next.x - last_sent.x).abs() < PTZ_UPDATE_THRESHOLD
+            && (next.y - last_sent.y).abs() < PTZ_UPDATE_THRESHOLD
+        {
             continue;
         }
 
-        let result = if next.x.abs() < 0.01 && next.y.abs() < 0.01 {
+        let result = if next.x.abs() < PTZ_STOP_THRESHOLD && next.y.abs() < PTZ_STOP_THRESHOLD {
             onvif
                 .stop(crate::onvif::models::StopRequest {
                     profile_token: None,
@@ -717,7 +730,7 @@ async fn run_recording_session(
     let mut pre_roll = VecDeque::new();
     let mut clip: Option<ClipBuffer> = None;
     let mut active_event_id = 0u64;
-    let mut buf = vec![0u8; 16 * 1024];
+    let mut buf = vec![0u8; RECORDING_CHUNK_SIZE];
 
     loop {
         let read = stdout
