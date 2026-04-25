@@ -3,6 +3,7 @@
 Rust API + web UI for:
 - live camera video via WebRTC (through go2rtc)
 - ONVIF PTZ control (move, stop, presets)
+- optional motion-driven PTZ auto-tracking with event recording
 
 ## Requirements
 
@@ -32,8 +33,14 @@ Variables:
 - `ONVIF_PASSWORD`
 - `ONVIF_AUTH_MODE` (optional): `wsse` (default) or `basic`
 - `ONVIF_PROFILE_TOKEN` (optional)
+- `AI_ENABLED` (optional): `true` to enable motion detection + auto-tracking
+- `AI_HOME_PRESET_TOKEN` (optional): preset token used after post-roll completes
+- `AI_RECORDINGS_DIR` (optional): output directory for saved `.ts` motion clips
+- `FFMPEG_BIN` (optional): ffmpeg binary name/path, defaults to `ffmpeg`
 
-Note: `RTSP_URL` is used by `go2rtc.yaml`, not directly by the Rust API.
+When `AI_ENABLED=true`, the Rust API also uses `RTSP_URL` directly for:
+- low-FPS grayscale motion detection
+- RTSP copy-based event recording with 3s RAM pre-roll
 
 ## Run go2rtc
 
@@ -93,6 +100,7 @@ podman run --replace \
 - `GET /` UI
 - `GET /api/onvif/profiles`
 - `GET /api/onvif/presets?profile_token=...`
+- `GET /api/ai/state`
 - `POST /api/onvif/move`
 - `POST /api/onvif/stop`
 - `POST /api/onvif/goto-preset`
@@ -102,3 +110,17 @@ podman run --replace \
 - Arrow buttons: press-and-hold for continuous move
 - Release: sends stop
 - Home button: uses ONVIF preset token (loaded from camera presets)
+- While AI auto-tracking is active, manual PTZ controls are disabled in the UI
+
+## Motion-driven PTZ + recording
+
+When `AI_ENABLED=true`, the server starts:
+- an FFmpeg raw grayscale detection pipeline (`fps=6`, padded to `640x360`)
+- an EMA background-subtraction motion detector with morphology cleanup
+- an ONVIF PTZ feedback loop that rate-limits movement and stops when centered
+- an FFmpeg copy pipeline that keeps a 3s RAM pre-roll and writes `.ts` clips only after post-roll finishes
+
+The browser polls `/api/ai/state` and shows:
+- whether auto-tracking is active
+- live target offset and PTZ velocity
+- whether event recording is still active

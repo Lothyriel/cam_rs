@@ -1,7 +1,9 @@
+mod ai;
 mod onvif;
 
 use std::{env, net::Ipv6Addr};
 
+use ai::{AiConfig, AiController, AiStateResponse};
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -21,11 +23,13 @@ use onvif::{
 struct AppState {
     webrtc_url: String,
     onvif: OnvifService,
+    ai: AiController,
 }
 
 struct AppConfig {
     webrtc_url: String,
     onvif: OnvifConfig,
+    ai: AiConfig,
 }
 
 impl AppConfig {
@@ -62,6 +66,7 @@ impl AppConfig {
                 onvif_profile_token,
                 onvif_auth_mode,
             ),
+            ai: AiConfig::from_env()?,
         })
     }
 }
@@ -79,9 +84,13 @@ async fn main() {
         .build()
         .expect("failed to create HTTP client");
 
+    let onvif = OnvifService::new(cfg.onvif, client);
+    let ai = AiController::spawn(cfg.ai, onvif.clone());
+
     let app_state = AppState {
         webrtc_url: cfg.webrtc_url,
-        onvif: OnvifService::new(cfg.onvif, client),
+        onvif,
+        ai,
     };
 
     let app = Router::new()
@@ -91,6 +100,7 @@ async fn main() {
         .route("/api/onvif/move", post(onvif_move))
         .route("/api/onvif/stop", post(onvif_stop))
         .route("/api/onvif/goto-preset", post(onvif_goto_preset))
+        .route("/api/ai/state", get(ai_state))
         .with_state(app_state);
 
     let addr = (Ipv6Addr::UNSPECIFIED, 5000);
@@ -164,6 +174,10 @@ async fn onvif_goto_preset(
         .goto_preset(payload)
         .await
         .map_err(map_onvif_error)
+}
+
+async fn ai_state(State(state): State<AppState>) -> Json<AiStateResponse> {
+    Json(state.ai.snapshot().await)
 }
 
 fn map_onvif_error(err: OnvifError) -> (StatusCode, String) {

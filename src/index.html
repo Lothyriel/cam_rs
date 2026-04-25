@@ -178,6 +178,60 @@
       grid-template-columns: 1fr;
     }
 
+    .ai-panel {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 14px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f8fbff;
+    }
+
+    .ai-banner {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: #334155;
+      background: #e2e8f0;
+    }
+
+    .ai-banner.active {
+      color: var(--accent-ink);
+      background: #ccfbf1;
+    }
+
+    .ai-grid {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      font-size: 0.84rem;
+    }
+
+    .ai-grid strong {
+      display: block;
+      margin-bottom: 3px;
+      color: #334155;
+    }
+
+    .ai-joystick {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      border-radius: 10px;
+      border: 1px dashed #b6c5d6;
+      background: #fff;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 1rem;
+      font-weight: 700;
+    }
+
     .list-block h3 {
       margin: 0 0 6px;
       font-size: 0.82rem;
@@ -254,6 +308,29 @@
           <select id="profile-select"></select>
         </div>
 
+        <div class="ai-panel">
+          <div class="ai-banner" id="ai-banner">Manual PTZ</div>
+          <div class="ai-grid">
+            <div>
+              <strong>Tracking</strong>
+              <span id="ai-tracking">Idle</span>
+            </div>
+            <div>
+              <strong>Offset</strong>
+              <span id="ai-offset">x 0.00 / y 0.00</span>
+            </div>
+            <div>
+              <strong>Velocity</strong>
+              <span id="ai-velocity">x 0.00 / y 0.00</span>
+            </div>
+            <div>
+              <strong>Recording</strong>
+              <span id="ai-recording">Idle</span>
+            </div>
+          </div>
+          <div class="ai-joystick" id="ai-joystick">·</div>
+        </div>
+
         <div class="dpad" id="ptz-controls">
           <button class="ghost" aria-hidden="true" tabindex="-1"></button>
           <button data-x="0" data-y="0.45" aria-label="Move up">↑</button>
@@ -283,14 +360,23 @@
   <script>
     const WEBRTC_URL = __WEBRTC_URL__;
     const CONFIGURED_PROFILE_TOKEN = __CONFIGURED_PROFILE_TOKEN__;
+    const AI_POLL_INTERVAL_MS = 500;
 
     const statusEl = document.getElementById('status');
     const presetsEl = document.getElementById('presets');
     const profileSelectEl = document.getElementById('profile-select');
     const goHomeBtn = document.querySelector('button[data-preset]');
+    const aiBannerEl = document.getElementById('ai-banner');
+    const aiTrackingEl = document.getElementById('ai-tracking');
+    const aiOffsetEl = document.getElementById('ai-offset');
+    const aiVelocityEl = document.getElementById('ai-velocity');
+    const aiRecordingEl = document.getElementById('ai-recording');
+    const aiJoystickEl = document.getElementById('ai-joystick');
+    const manualButtons = [...document.querySelectorAll('#ptz-controls button[data-x]'), goHomeBtn];
 
     let selectedProfileToken = CONFIGURED_PROFILE_TOKEN || null;
     let selectedPresetToken = null;
+    let manualLocked = false;
 
     const webrtcFrame = document.getElementById('webrtc-frame');
     webrtcFrame.src = WEBRTC_URL;
@@ -309,6 +395,77 @@
       const text = await res.text();
       if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
       setStatus(text || 'OK');
+    }
+
+    function formatAxis(axis) {
+      return `x ${Number(axis?.x || 0).toFixed(2)} / y ${Number(axis?.y || 0).toFixed(2)}`;
+    }
+
+    function toArrow(axis) {
+      const x = Number(axis?.x || 0);
+      const y = Number(axis?.y || 0);
+      const horizontal = x > 0.12 ? '→' : x < -0.12 ? '←' : '';
+      const vertical = y > 0.12 ? '↓' : y < -0.12 ? '↑' : '';
+      return `${vertical}${horizontal}` || '·';
+    }
+
+    async function applyAiState(data) {
+      const enabled = Boolean(data?.enabled);
+      const available = Boolean(enabled && data?.available);
+      const locked = Boolean(data?.manual_locked);
+
+      aiBannerEl.textContent = locked
+        ? 'Auto-tracking active'
+        : available
+          ? 'Manual PTZ'
+          : enabled
+            ? 'AI reconnecting'
+            : 'AI disabled';
+      aiBannerEl.classList.toggle('active', locked);
+      aiTrackingEl.textContent = data?.tracking ? 'Following target' : 'Idle';
+      aiOffsetEl.textContent = formatAxis(data?.target_offset);
+      aiVelocityEl.textContent = formatAxis(data?.ptz_velocity);
+      aiRecordingEl.textContent = data?.recording ? 'Saving after event' : 'Idle';
+      aiJoystickEl.textContent = `${toArrow(data?.target_offset)} / ${toArrow(data?.ptz_velocity)}`;
+
+      manualButtons.forEach((button) => {
+        if (button === goHomeBtn) {
+          button.disabled = locked || !selectedPresetToken;
+        } else {
+          button.disabled = locked;
+        }
+      });
+      profileSelectEl.disabled = locked;
+
+      if (locked && !manualLocked && activeMoveButton) {
+        activeMoveButton = null;
+        try {
+          await sendStop();
+        } catch (err) {
+          setStatus(`Error: ${err.message}`, true);
+        }
+      }
+
+      if (data?.last_error) {
+        setStatus(`AI: ${data.last_error}`, true);
+      }
+
+      manualLocked = locked;
+    }
+
+    async function pollAiState() {
+      try {
+        const res = await fetch('/api/ai/state');
+        const data = await res.json();
+        if (!res.ok) throw new Error(JSON.stringify(data));
+        await applyAiState(data);
+      } catch (err) {
+        aiBannerEl.textContent = 'AI unavailable';
+        aiBannerEl.classList.remove('active');
+        aiTrackingEl.textContent = 'Unknown';
+        aiRecordingEl.textContent = 'Unknown';
+        aiJoystickEl.textContent = '!';
+      }
     }
 
     async function loadProfiles() {
@@ -355,7 +512,7 @@
 
         const homeByName = presets.find(p => (p.name || '').toLowerCase() === 'home');
         selectedPresetToken = (homeByName || presets[0] || {}).token || null;
-        goHomeBtn.disabled = !selectedPresetToken;
+        goHomeBtn.disabled = manualLocked || !selectedPresetToken;
       } catch (err) {
         presetsEl.innerHTML = `<li>Error: ${err.message}</li>`;
         goHomeBtn.disabled = true;
@@ -369,9 +526,14 @@
     });
 
     loadProfiles();
+    pollAiState();
+    window.setInterval(() => {
+      pollAiState();
+    }, AI_POLL_INTERVAL_MS);
 
     goHomeBtn.addEventListener('click', async () => {
       try {
+        if (manualLocked) throw new Error('Manual PTZ is disabled while auto-tracking is active');
         if (!selectedPresetToken) throw new Error('No preset token available for this profile');
         await postJson('/api/onvif/goto-preset', {
           preset_token: selectedPresetToken,
@@ -389,6 +551,7 @@
 
     function bindDirectionalButton(btn) {
       const start = async (event) => {
+        if (manualLocked) return;
         if (activeMoveButton === btn) return;
         event.preventDefault();
         activeMoveButton = btn;
