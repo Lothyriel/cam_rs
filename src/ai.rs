@@ -19,7 +19,7 @@ use tokio::{
 
 use crate::onvif::{
     models::PresetRequest,
-    service::{OnvifError, OnvifService},
+    service::OnvifService,
 };
 
 #[derive(Clone)]
@@ -107,6 +107,9 @@ struct MotionDetector {
     alpha_milli: u32,
     base_threshold: u8,
     min_blob_area: usize,
+    motion_start_frames: u32,
+    motion_end_frames: u32,
+    background_initialized: bool,
     background: Vec<u16>,
     mask: Vec<u8>,
     scratch: Vec<u8>,
@@ -123,7 +126,7 @@ struct Chunk {
 }
 
 struct ClipBuffer {
-    started_at: Instant,
+    started_at: OffsetDateTime,
     post_roll_deadline: Option<Instant>,
     bytes: Vec<u8>,
 }
@@ -171,7 +174,8 @@ impl AiConfig {
             .unwrap_or_else(|_| PathBuf::from("recordings"));
         let home_preset_token = env::var("AI_HOME_PRESET_TOKEN").ok();
         let rtsp_url = if enabled {
-            env::var("RTSP_URL").map_err(|_| "RTSP_URL is required when AI_ENABLED=true".to_string())?
+            env::var("RTSP_URL")
+                .map_err(|_| "RTSP_URL is required when AI_ENABLED=true".to_string())?
         } else {
             env::var("RTSP_URL").unwrap_or_default()
         };
@@ -199,10 +203,6 @@ impl AiConfig {
             recordings_dir,
             home_preset_token,
         })
-    }
-
-    pub fn enabled(&self) -> bool {
-        self.enabled
     }
 
     fn frame_len(&self) -> usize {
@@ -267,6 +267,9 @@ impl MotionDetector {
             alpha_milli: cfg.ema_alpha_milli.clamp(1, 1000),
             base_threshold: cfg.threshold,
             min_blob_area,
+            motion_start_frames: cfg.motion_start_frames.max(1),
+            motion_end_frames: cfg.motion_end_frames.max(1),
+            background_initialized: false,
             background: vec![0; frame_len],
             mask: vec![0; frame_len],
             scratch: vec![0; frame_len],
@@ -279,17 +282,19 @@ impl MotionDetector {
     }
 
     fn process_frame(&mut self, frame: &[u8]) -> Option<AxisValue> {
-        if self.background[0] == 0 {
+        if !self.background_initialized {
             for (bg, px) in self.background.iter_mut().zip(frame.iter().copied()) {
                 *bg = (px as u16) << 8;
             }
+            self.background_initialized = true;
         }
 
         let mut diff_sum = 0u64;
         for (idx, pixel) in frame.iter().copied().enumerate() {
             let current = (pixel as u16) << 8;
             let bg = self.background[idx];
-            let updated = bg + (((current as i32 - bg as i32) * self.alpha_milli as i32) / 1000) as u16;
+            let updated =
+                bg + (((current as i32 - bg as i32) * self.alpha_milli as i32) / 1000) as u16;
             self.background[idx] = updated;
             let diff = current.abs_diff(updated) >> 8;
             diff_sum += diff as u64;
@@ -313,7 +318,7 @@ impl MotionDetector {
         if let Some(blob) = blob {
             self.empty_frames = 0;
             self.motion_frames = self.motion_frames.saturating_add(1);
-            if self.motion_frames < 2 {
+            if self.motion_frames < self.motion_start_frames {
                 return None;
             }
             return Some(self.update_track(blob));
@@ -321,7 +326,7 @@ impl MotionDetector {
 
         self.motion_frames = 0;
         self.empty_frames = self.empty_frames.saturating_add(1);
-        if self.empty_frames >= 3 {
+        if self.empty_frames >= self.motion_end_frames {
             self.target = None;
         }
         None
@@ -381,7 +386,10 @@ impl MotionDetector {
                 area,
             };
 
-            if best.map(|current: Blob| candidate.area > current.area).unwrap_or(true) {
+            if best
+                .map(|current: Blob| candidate.area > current.area)
+                .unwrap_or(true)
+            {
                 best = Some(candidate);
             }
         }
@@ -392,8 +400,10 @@ impl MotionDetector {
     fn update_track(&mut self, blob: Blob) -> AxisValue {
         let now = Instant::now();
         let raw_offset = AxisValue {
-            x: ((blob.centroid_x - self.width as f32 / 2.0) / (self.width as f32 / 2.0)).clamp(-1.0, 1.0),
-            y: ((blob.centroid_y - self.height as f32 / 2.0) / (self.height as f32 / 2.0)).clamp(-1.0, 1.0),
+            x: ((blob.centroid_x - self.width as f32 / 2.0) / (self.width as f32 / 2.0))
+                .clamp(-1.0, 1.0),
+            y: ((blob.centroid_y - self.height as f32 / 2.0) / (self.height as f32 / 2.0))
+                .clamp(-1.0, 1.0),
         };
 
         let should_replace = match self.target {
@@ -446,10 +456,17 @@ async fn run_detection_loop(cfg: AiConfig, state: Arc<RwLock<AiRuntime>>) {
     }
 }
 
-async fn run_detection_session(cfg: &AiConfig, state: Arc<RwLock<AiRuntime>>) -> Result<(), String> {
+async fn run_detection_session(
+    cfg: &AiConfig,
+    state: Arc<RwLock<AiRuntime>>,
+) -> Result<(), String> {
     let filter = format!(
         "fps={},scale={}x{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,format=gray",
-        cfg.detection_fps, cfg.detection_width, cfg.detection_height, cfg.detection_width, cfg.detection_height
+        cfg.detection_fps,
+        cfg.detection_width,
+        cfg.detection_height,
+        cfg.detection_width,
+        cfg.detection_height
     );
 
     let mut child = Command::new(&cfg.ffmpeg_bin)
@@ -558,7 +575,9 @@ async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<RwLock<AiRu
             centered_since = None;
             if last_sent.x.abs() > 0.01 || last_sent.y.abs() > 0.01 {
                 if let Err(err) = onvif
-                    .stop(crate::onvif::models::StopRequest { profile_token: None })
+                    .stop(crate::onvif::models::StopRequest {
+                        profile_token: None,
+                    })
                     .await
                 {
                     update_error(&state, err.message()).await;
@@ -578,8 +597,16 @@ async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<RwLock<AiRu
         }
 
         let mut desired = AxisValue {
-            x: if offset.x.abs() < cfg.ptz_dead_zone { 0.0 } else { (offset.x * cfg.ptz_gain_x).clamp(-1.0, 1.0) },
-            y: if offset.y.abs() < cfg.ptz_dead_zone { 0.0 } else { (offset.y * cfg.ptz_gain_y).clamp(-1.0, 1.0) },
+            x: if offset.x.abs() < cfg.ptz_dead_zone {
+                0.0
+            } else {
+                (offset.x * cfg.ptz_gain_x).clamp(-1.0, 1.0)
+            },
+            y: if offset.y.abs() < cfg.ptz_dead_zone {
+                0.0
+            } else {
+                (offset.y * cfg.ptz_gain_y).clamp(-1.0, 1.0)
+            },
         };
 
         if centered_since
@@ -600,7 +627,9 @@ async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<RwLock<AiRu
 
         let result = if next.x.abs() < 0.01 && next.y.abs() < 0.01 {
             onvif
-                .stop(crate::onvif::models::StopRequest { profile_token: None })
+                .stop(crate::onvif::models::StopRequest {
+                    profile_token: None,
+                })
                 .await
                 .map(|_| "stop")
         } else {
@@ -702,12 +731,17 @@ async fn run_recording_session(
             if stderr.is_empty() {
                 return Err("FFmpeg recording stream ended unexpectedly".to_string());
             }
-            return Err(format!("FFmpeg recording stream ended unexpectedly: {stderr}"));
+            return Err(format!(
+                "FFmpeg recording stream ended unexpectedly: {stderr}"
+            ));
         }
 
         let chunk = buf[..read].to_vec();
         let now = Instant::now();
-        pre_roll.push_back(Chunk { at: now, data: chunk.clone() });
+        pre_roll.push_back(Chunk {
+            at: now,
+            data: chunk.clone(),
+        });
         while pre_roll
             .front()
             .map(|front| now.duration_since(front.at) > cfg.pre_roll)
@@ -727,7 +761,7 @@ async fn run_recording_session(
                 bytes.extend_from_slice(&chunk.data);
             }
             clip = Some(ClipBuffer {
-                started_at: now,
+                started_at: OffsetDateTime::now_utc(),
                 post_roll_deadline: None,
                 bytes,
             });
@@ -740,7 +774,9 @@ async fn run_recording_session(
             if motion_active {
                 active_clip.post_roll_deadline = None;
             } else {
-                active_clip.post_roll_deadline.get_or_insert(now + cfg.post_roll);
+                active_clip
+                    .post_roll_deadline
+                    .get_or_insert(now + cfg.post_roll);
             }
 
             if active_clip
@@ -789,10 +825,8 @@ async fn return_home(cfg: &AiConfig, onvif: &OnvifService, state: &Arc<RwLock<Ai
     runtime.target_offset = AxisValue::default();
 }
 
-fn recording_path(root: &PathBuf, started_at: Instant) -> Result<PathBuf, String> {
-    let wall_clock = OffsetDateTime::now_utc()
-        - time::Duration::seconds((Instant::now().duration_since(started_at).as_secs() as i64).max(0));
-    let stamp = wall_clock
+fn recording_path(root: &PathBuf, started_at: OffsetDateTime) -> Result<PathBuf, String> {
+    let stamp = started_at
         .format(&Rfc3339)
         .map_err(|e| e.to_string())?
         .replace(':', "-");
@@ -850,7 +884,9 @@ fn parse_env_bool(name: &str, default: bool) -> Result<bool, String> {
         Ok(value) => match value.trim().to_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => Ok(true),
             "0" | "false" | "no" | "off" => Ok(false),
-            other => Err(format!("{name} must be one of true|false|1|0|yes|no|on|off, got: {other}")),
+            other => Err(format!(
+                "{name} must be one of true|false|1|0|yes|no|on|off, got: {other}"
+            )),
         },
         Err(_) => Ok(default),
     }
@@ -859,7 +895,11 @@ fn parse_env_bool(name: &str, default: bool) -> Result<bool, String> {
 fn parse_env_usize(name: &str, default: usize) -> Result<usize, String> {
     env::var(name)
         .ok()
-        .map(|value| value.parse::<usize>().map_err(|_| format!("{name} must be a positive integer")))
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| format!("{name} must be a positive integer"))
+        })
         .transpose()
         .map(|value| value.unwrap_or(default))
 }
@@ -867,7 +907,11 @@ fn parse_env_usize(name: &str, default: usize) -> Result<usize, String> {
 fn parse_env_u8(name: &str, default: u8) -> Result<u8, String> {
     env::var(name)
         .ok()
-        .map(|value| value.parse::<u8>().map_err(|_| format!("{name} must be an integer between 0 and 255")))
+        .map(|value| {
+            value
+                .parse::<u8>()
+                .map_err(|_| format!("{name} must be an integer between 0 and 255"))
+        })
         .transpose()
         .map(|value| value.unwrap_or(default))
 }
@@ -875,7 +919,11 @@ fn parse_env_u8(name: &str, default: u8) -> Result<u8, String> {
 fn parse_env_u32(name: &str, default: u32) -> Result<u32, String> {
     env::var(name)
         .ok()
-        .map(|value| value.parse::<u32>().map_err(|_| format!("{name} must be a positive integer")))
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .map_err(|_| format!("{name} must be a positive integer"))
+        })
         .transpose()
         .map(|value| value.unwrap_or(default))
 }
@@ -883,7 +931,11 @@ fn parse_env_u32(name: &str, default: u32) -> Result<u32, String> {
 fn parse_env_u64(name: &str, default: u64) -> Result<u64, String> {
     env::var(name)
         .ok()
-        .map(|value| value.parse::<u64>().map_err(|_| format!("{name} must be a positive integer")))
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| format!("{name} must be a positive integer"))
+        })
         .transpose()
         .map(|value| value.unwrap_or(default))
 }
@@ -891,7 +943,11 @@ fn parse_env_u64(name: &str, default: u64) -> Result<u64, String> {
 fn parse_env_f32(name: &str, default: f32) -> Result<f32, String> {
     env::var(name)
         .ok()
-        .map(|value| value.parse::<f32>().map_err(|_| format!("{name} must be a number")))
+        .map(|value| {
+            value
+                .parse::<f32>()
+                .map_err(|_| format!("{name} must be a number"))
+        })
         .transpose()
         .map(|value| value.unwrap_or(default))
 }
@@ -926,14 +982,4 @@ async fn clear_error(state: &Arc<RwLock<AiRuntime>>) {
 async fn update_error(state: &Arc<RwLock<AiRuntime>>, message: String) {
     let mut runtime = state.write().await;
     runtime.last_error = Some(message);
-}
-
-trait OnvifErrorMessage {
-    fn message(self) -> String;
-}
-
-impl OnvifErrorMessage for OnvifError {
-    fn message(self) -> String {
-        OnvifError::message(self)
-    }
 }

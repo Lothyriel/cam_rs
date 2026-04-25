@@ -3,6 +3,7 @@ mod onvif;
 
 use std::{env, net::Ipv6Addr};
 
+use ai::{AiConfig, AiController, AiStateResponse};
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -10,7 +11,6 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
-use ai::{AiConfig, AiController, AiStateResponse};
 use onvif::{
     models::{
         MoveRequest, OnvifPresetsResponse, OnvifProfilesResponse, PresetRequest, PresetsQuery,
