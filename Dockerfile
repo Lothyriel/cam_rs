@@ -16,7 +16,7 @@ RUN cargo build --release
 
 FROM debian:stable-slim AS runtime
 
-RUN apt-get update && apt-get install --no-install-recommends -y tini ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install --no-install-recommends -y tini ca-certificates ffmpeg vainfo intel-media-va-driver && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder /app/target/release/cam_rs /usr/local/bin
