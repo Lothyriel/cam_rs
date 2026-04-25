@@ -80,7 +80,7 @@ pub struct AiStateResponse {
     pub last_error: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct AiRuntime {
     enabled: bool,
     available: bool,
@@ -140,24 +140,6 @@ struct ClipBuffer {
     bytes: Vec<u8>,
 }
 
-impl Default for AiRuntime {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            available: false,
-            ai_active: false,
-            tracking: false,
-            recording: false,
-            manual_locked: false,
-            motion_active: false,
-            target_offset: AxisValue::default(),
-            ptz_velocity: AxisValue::default(),
-            last_error: None,
-            event_id: 0,
-        }
-    }
-}
-
 impl AiConfig {
     pub fn from_env() -> Result<Self, String> {
         let enabled = parse_env_bool("AI_ENABLED", false)?;
@@ -183,10 +165,10 @@ impl AiConfig {
             .unwrap_or_else(|_| PathBuf::from("recordings"));
         let home_preset_token = env::var("AI_HOME_PRESET_TOKEN").ok();
         let rtsp_url = if enabled {
-            env::var("RTSP_URL")
+            env::var("AI_RTSP_URL")
                 .map_err(|_| "RTSP_URL is required when AI_ENABLED=true".to_string())?
         } else {
-            env::var("RTSP_URL").unwrap_or_default()
+            env::var("AI_RTSP_URL").unwrap_or_default()
         };
 
         Ok(Self {
