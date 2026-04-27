@@ -1,14 +1,17 @@
 mod ai;
 mod onvif;
 
-use std::{env, net::Ipv6Addr};
+use std::{convert::Infallible, env, net::Ipv6Addr};
 
 use ai::{AiConfig, AiController, AiStateResponse};
 use axum::{
     Json, Router,
     extract::{Query, State},
     http::StatusCode,
-    response::{Html, IntoResponse},
+    response::{
+        Html, IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use onvif::{
@@ -106,6 +109,7 @@ async fn main() {
         .route("/api/onvif/stop", post(onvif_stop))
         .route("/api/onvif/goto-preset", post(onvif_goto_preset))
         .route("/api/ai/state", get(ai_state))
+        .route("/api/ai/events", get(ai_events))
         .route("/api/ai/enabled", post(ai_enabled))
         .with_state(app_state);
 
@@ -201,6 +205,26 @@ async fn ai_state(State(state): State<AppState>) -> Json<AiStateResponse> {
     Json(state.ai.snapshot().await)
 }
 
+async fn ai_events(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let mut events = state.ai.subscribe();
+    let stream = async_stream::stream! {
+        let initial = events.borrow().clone();
+        yield Ok::<Event, Infallible>(ai_state_event(&initial));
+
+        loop {
+            if events.changed().await.is_err() {
+                break;
+            }
+            let snapshot = events.borrow().clone();
+            yield Ok::<Event, Infallible>(ai_state_event(&snapshot));
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 async fn ai_enabled(
     State(state): State<AppState>,
     Json(payload): Json<AiEnabledRequest>,
@@ -215,6 +239,12 @@ async fn ai_enabled(
 
 fn map_onvif_error(err: OnvifError) -> (StatusCode, String) {
     (err.status_code(), err.message())
+}
+
+fn ai_state_event(state: &AiStateResponse) -> Event {
+    let data = serde_json::to_string(state)
+        .unwrap_or_else(|_| "{\"last_error\":\"failed to serialize AI state\"}".to_string());
+    Event::default().event("state").data(data)
 }
 
 const HTML_TEMPLATE: &str = include_str!("index.html");

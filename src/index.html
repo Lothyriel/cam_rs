@@ -418,8 +418,6 @@
   <script>
     const WEBRTC_URL = __WEBRTC_URL__;
     const CONFIGURED_PROFILE_TOKEN = __CONFIGURED_PROFILE_TOKEN__;
-    const AI_POLL_INTERVAL_MS = 500;
-
     const statusEl = document.getElementById('status');
     const presetsEl = document.getElementById('presets');
     const profileSelectEl = document.getElementById('profile-select');
@@ -441,6 +439,7 @@
     let aiEnabled = false;
     let aiConfigured = false;
     let aiTogglePending = false;
+    let aiEventSource = null;
 
     const webrtcFrame = document.getElementById('webrtc-frame');
     webrtcFrame.src = WEBRTC_URL;
@@ -573,20 +572,31 @@
       manualLocked = locked;
     }
 
-    async function pollAiState() {
-      try {
-        const res = await fetch('/api/ai/state');
-        const data = await res.json();
-        if (!res.ok) throw new Error(JSON.stringify(data));
-        await applyAiState(data);
-      } catch (err) {
-        aiBannerEl.textContent = 'AI unavailable';
-        aiBannerEl.classList.remove('active');
-        aiTrackingEl.textContent = 'Unknown';
-        aiRecordingEl.textContent = 'Unknown';
-        aiCameraMotionEl.textContent = 'Unknown';
-        aiJoystickEl.textContent = '!';
+    function showAiStreamDisconnected() {
+      aiBannerEl.textContent = 'AI unavailable';
+      aiBannerEl.classList.remove('active');
+      aiTrackingEl.textContent = 'Unknown';
+      aiRecordingEl.textContent = 'Unknown';
+      aiCameraMotionEl.textContent = 'Unknown';
+      aiJoystickEl.textContent = '!';
+    }
+
+    function connectAiStateStream() {
+      if (aiEventSource) {
+        aiEventSource.close();
       }
+
+      aiEventSource = new EventSource('/api/ai/events');
+      aiEventSource.addEventListener('state', async (event) => {
+        try {
+          await applyAiState(JSON.parse(event.data));
+        } catch (err) {
+          setStatus(`Error: ${err.message}`, true);
+        }
+      });
+      aiEventSource.onerror = () => {
+        showAiStreamDisconnected();
+      };
     }
 
     async function loadProfiles() {
@@ -647,10 +657,7 @@
     });
 
     loadProfiles();
-    pollAiState();
-    window.setInterval(() => {
-      pollAiState();
-    }, AI_POLL_INTERVAL_MS);
+    connectAiStateStream();
 
     goHomeBtn.addEventListener('click', async () => {
       try {
@@ -724,6 +731,9 @@
       } catch (err) {
         setStatus(`Error: ${err.message}`, true);
       }
+    });
+    window.addEventListener('beforeunload', () => {
+      aiEventSource?.close();
     });
   </script>
 </body>

@@ -13,7 +13,7 @@ use tokio::{
     fs,
     io::AsyncReadExt,
     process::Command,
-    sync::RwLock,
+    sync::{RwLock, watch},
     time::{MissedTickBehavior, interval, sleep},
 };
 
@@ -35,9 +35,14 @@ const DEFAULT_PRESET_SETTLE_MS: u64 = 3000;
 
 #[derive(Clone)]
 pub struct AiController {
-    state: Arc<RwLock<AiRuntime>>,
+    shared: Arc<AiShared>,
     camera_settle: Duration,
     preset_settle: Duration,
+}
+
+struct AiShared {
+    runtime: RwLock<AiRuntime>,
+    events: watch::Sender<AiStateResponse>,
 }
 
 #[derive(Clone)]
@@ -68,13 +73,13 @@ pub struct AiConfig {
     home_preset_token: Option<String>,
 }
 
-#[derive(Clone, Copy, Default, Serialize)]
+#[derive(Clone, Copy, Default, PartialEq, Serialize)]
 pub struct AxisValue {
     pub x: f32,
     pub y: f32,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct AiStateResponse {
     pub enabled: bool,
     pub configured: bool,
@@ -221,27 +226,32 @@ impl AiConfig {
 
 impl AiController {
     pub fn spawn(cfg: AiConfig, onvif: OnvifService) -> Self {
-        let state = Arc::new(RwLock::new(AiRuntime {
+        let runtime = AiRuntime {
             enabled: cfg.enabled,
             configured: cfg.configured,
             ..AiRuntime::default()
-        }));
+        };
+        let (events, _) = watch::channel(ai_state_response(&runtime));
+        let shared = Arc::new(AiShared {
+            runtime: RwLock::new(runtime),
+            events,
+        });
 
         if cfg.configured {
-            let detection_state = Arc::clone(&state);
+            let detection_state = Arc::clone(&shared);
             let detection_cfg = cfg.clone();
             tokio::spawn(async move {
                 run_detection_loop(detection_cfg, detection_state).await;
             });
 
-            let ptz_state = Arc::clone(&state);
+            let ptz_state = Arc::clone(&shared);
             let ptz_cfg = cfg.clone();
             let ptz_onvif = onvif.clone();
             tokio::spawn(async move {
                 run_ptz_loop(ptz_cfg, ptz_onvif, ptz_state).await;
             });
 
-            let record_state = Arc::clone(&state);
+            let record_state = Arc::clone(&shared);
             let record_cfg = cfg.clone();
             tokio::spawn(async move {
                 run_recording_loop(record_cfg, onvif, record_state).await;
@@ -249,32 +259,23 @@ impl AiController {
         }
 
         Self {
-            state,
+            shared,
             camera_settle: cfg.camera_settle,
             preset_settle: cfg.preset_settle,
         }
     }
 
     pub async fn snapshot(&self) -> AiStateResponse {
-        let state = self.state.read().await;
-        let camera_moving = state.camera_motion_active();
-        AiStateResponse {
-            enabled: state.enabled,
-            configured: state.configured,
-            available: state.available,
-            ai_active: state.ai_active,
-            tracking: state.tracking,
-            recording: state.recording,
-            manual_locked: state.enabled && (state.ai_active || camera_moving),
-            camera_moving,
-            target_offset: state.target_offset,
-            ptz_velocity: state.ptz_velocity,
-            last_error: state.last_error.clone(),
-        }
+        let state = self.shared.runtime.read().await;
+        ai_state_response(&state)
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<AiStateResponse> {
+        self.shared.events.subscribe()
     }
 
     pub async fn set_enabled(&self, enabled: bool) -> Result<(), String> {
-        let mut state = self.state.write().await;
+        let mut state = self.shared.runtime.write().await;
         if enabled && !state.configured {
             return Err("AI is not configured. Set RTSP_URL or AI_RTSP_URL first.".to_string());
         }
@@ -290,19 +291,20 @@ impl AiController {
             state.ptz_velocity = AxisValue::default();
         }
         refresh_runtime_flags(&mut state);
+        publish_state(&state, &self.shared.events);
         Ok(())
     }
 
     pub async fn note_camera_move_started(&self, velocity: AxisValue) {
-        mark_camera_move_started(&self.state, velocity).await;
+        mark_camera_move_started(&self.shared, velocity).await;
     }
 
     pub async fn note_camera_move_stopped(&self) {
-        mark_camera_move_stopped(&self.state, self.camera_settle).await;
+        mark_camera_move_stopped(&self.shared, self.camera_settle).await;
     }
 
     pub async fn note_camera_preset_move(&self) {
-        mark_camera_motion_for(&self.state, self.preset_settle).await;
+        mark_camera_motion_for(&self.shared, self.preset_settle).await;
     }
 }
 
@@ -515,7 +517,7 @@ impl MotionDetector {
     }
 }
 
-async fn run_detection_loop(cfg: AiConfig, state: Arc<RwLock<AiRuntime>>) {
+async fn run_detection_loop(cfg: AiConfig, state: Arc<AiShared>) {
     let mut backoff = Duration::from_secs(1);
 
     loop {
@@ -533,7 +535,7 @@ async fn run_detection_loop(cfg: AiConfig, state: Arc<RwLock<AiRuntime>>) {
 
 async fn run_detection_session(
     cfg: &AiConfig,
-    state: Arc<RwLock<AiRuntime>>,
+    state: Arc<AiShared>,
 ) -> Result<(), String> {
     let filter = format!(
         "fps={},scale={}x{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,format=gray",
@@ -596,7 +598,7 @@ async fn run_detection_session(
         match stdout.read_exact(&mut frame).await {
             Ok(_) => {
                 let suppress_detection = {
-                    let runtime = state.read().await;
+                    let runtime = state.runtime.read().await;
                     !runtime.enabled || runtime.camera_motion_active()
                 };
 
@@ -607,7 +609,7 @@ async fn run_detection_session(
                 }
 
                 if let Some(offset) = detector.process_frame(&frame) {
-                    let mut runtime = state.write().await;
+                    let mut runtime = state.runtime.write().await;
                     if !motion_active && detector.motion_frames >= cfg.motion_start_frames {
                         motion_active = true;
                         runtime.event_id = runtime.event_id.saturating_add(1);
@@ -617,13 +619,15 @@ async fn run_detection_session(
                     runtime.tracking = motion_active;
                     runtime.target_offset = offset;
                     refresh_runtime_flags(&mut runtime);
+                    publish_state(&runtime, &state.events);
                 } else if motion_active && detector.motion_ended(cfg.motion_end_frames) {
-                    let mut runtime = state.write().await;
+                    let mut runtime = state.runtime.write().await;
                     motion_active = false;
                     runtime.motion_active = false;
                     runtime.tracking = false;
                     runtime.target_offset = AxisValue::default();
                     refresh_runtime_flags(&mut runtime);
+                    publish_state(&runtime, &state.events);
                 }
             }
             Err(err) => {
@@ -641,7 +645,7 @@ async fn run_detection_session(
     }
 }
 
-async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<RwLock<AiRuntime>>) {
+async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<AiShared>) {
     let mut ticker = interval(cfg.ptz_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut last_sent = AxisValue::default();
@@ -651,7 +655,7 @@ async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<RwLock<AiRu
         ticker.tick().await;
 
         let snapshot = {
-            let runtime = state.read().await;
+            let runtime = state.runtime.read().await;
             runtime.clone()
         };
 
@@ -750,7 +754,7 @@ async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<RwLock<AiRu
     }
 }
 
-async fn run_recording_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<RwLock<AiRuntime>>) {
+async fn run_recording_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<AiShared>) {
     let mut backoff = Duration::from_secs(1);
 
     loop {
@@ -768,7 +772,7 @@ async fn run_recording_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<RwLoc
 async fn run_recording_session(
     cfg: &AiConfig,
     onvif: &OnvifService,
-    state: Arc<RwLock<AiRuntime>>,
+    state: Arc<AiShared>,
 ) -> Result<(), String> {
     let mut child = Command::new(&cfg.ffmpeg_bin)
         .args([
@@ -844,7 +848,7 @@ async fn run_recording_session(
         }
 
         let (motion_active, event_id) = {
-            let runtime = state.read().await;
+            let runtime = state.runtime.read().await;
             if !runtime.enabled {
                 (false, 0)
             } else {
@@ -907,7 +911,7 @@ async fn run_recording_session(
     }
 }
 
-async fn return_home(cfg: &AiConfig, onvif: &OnvifService, state: &Arc<RwLock<AiRuntime>>) {
+async fn return_home(cfg: &AiConfig, onvif: &OnvifService, state: &Arc<AiShared>) {
     set_ptz_velocity(state, AxisValue::default()).await;
     if let Some(preset_token) = cfg.home_preset_token.clone() {
         mark_camera_motion_for(state, cfg.preset_settle).await;
@@ -923,12 +927,13 @@ async fn return_home(cfg: &AiConfig, onvif: &OnvifService, state: &Arc<RwLock<Ai
         }
     }
 
-    let mut runtime = state.write().await;
+    let mut runtime = state.runtime.write().await;
     runtime.camera_moving = false;
     runtime.tracking = false;
     runtime.motion_active = false;
     runtime.target_offset = AxisValue::default();
     refresh_runtime_flags(&mut runtime);
+    publish_state(&runtime, &state.events);
 }
 
 fn recording_path(root: &PathBuf, started_at: OffsetDateTime) -> Result<PathBuf, String> {
@@ -1063,67 +1068,97 @@ fn rate_limit(current: f32, desired: f32, max_step: f32) -> f32 {
     (current + delta).clamp(-1.0, 1.0)
 }
 
-async fn set_available(state: &Arc<RwLock<AiRuntime>>, available: bool) {
-    let mut runtime = state.write().await;
+async fn set_available(state: &Arc<AiShared>, available: bool) {
+    let mut runtime = state.runtime.write().await;
     runtime.available = available;
+    publish_state(&runtime, &state.events);
 }
 
-async fn set_ptz_velocity(state: &Arc<RwLock<AiRuntime>>, velocity: AxisValue) {
-    let mut runtime = state.write().await;
+async fn set_ptz_velocity(state: &Arc<AiShared>, velocity: AxisValue) {
+    let mut runtime = state.runtime.write().await;
     runtime.ptz_velocity = velocity;
+    publish_state(&runtime, &state.events);
 }
 
-async fn set_recording_state(state: &Arc<RwLock<AiRuntime>>, recording: bool) {
-    let mut runtime = state.write().await;
+async fn set_recording_state(state: &Arc<AiShared>, recording: bool) {
+    let mut runtime = state.runtime.write().await;
     runtime.recording = runtime.enabled && recording;
     refresh_runtime_flags(&mut runtime);
+    publish_state(&runtime, &state.events);
 }
 
-async fn clear_error(state: &Arc<RwLock<AiRuntime>>) {
-    let mut runtime = state.write().await;
+async fn clear_error(state: &Arc<AiShared>) {
+    let mut runtime = state.runtime.write().await;
     runtime.last_error = None;
+    publish_state(&runtime, &state.events);
 }
 
-async fn update_error(state: &Arc<RwLock<AiRuntime>>, message: String) {
-    let mut runtime = state.write().await;
+async fn update_error(state: &Arc<AiShared>, message: String) {
+    let mut runtime = state.runtime.write().await;
     runtime.last_error = Some(message);
+    publish_state(&runtime, &state.events);
 }
 
-async fn clear_detection_state(state: &Arc<RwLock<AiRuntime>>) {
-    let mut runtime = state.write().await;
+async fn clear_detection_state(state: &Arc<AiShared>) {
+    let mut runtime = state.runtime.write().await;
     runtime.motion_active = false;
     runtime.tracking = false;
     runtime.target_offset = AxisValue::default();
     refresh_runtime_flags(&mut runtime);
+    publish_state(&runtime, &state.events);
 }
 
-async fn mark_camera_move_started(state: &Arc<RwLock<AiRuntime>>, velocity: AxisValue) {
-    let mut runtime = state.write().await;
+async fn mark_camera_move_started(state: &Arc<AiShared>, velocity: AxisValue) {
+    let mut runtime = state.runtime.write().await;
     runtime.camera_moving = true;
     runtime.camera_settle_until = None;
     runtime.ptz_velocity = velocity;
     runtime.tracking = false;
     runtime.target_offset = AxisValue::default();
     refresh_runtime_flags(&mut runtime);
+    publish_state(&runtime, &state.events);
 }
 
-async fn mark_camera_move_stopped(state: &Arc<RwLock<AiRuntime>>, settle: Duration) {
-    let mut runtime = state.write().await;
+async fn mark_camera_move_stopped(state: &Arc<AiShared>, settle: Duration) {
+    let mut runtime = state.runtime.write().await;
     runtime.camera_moving = false;
     runtime.camera_settle_until = Some(Instant::now() + settle);
     runtime.ptz_velocity = AxisValue::default();
     runtime.tracking = false;
     runtime.target_offset = AxisValue::default();
     refresh_runtime_flags(&mut runtime);
+    publish_state(&runtime, &state.events);
 }
 
-async fn mark_camera_motion_for(state: &Arc<RwLock<AiRuntime>>, duration: Duration) {
-    let mut runtime = state.write().await;
+async fn mark_camera_motion_for(state: &Arc<AiShared>, duration: Duration) {
+    let mut runtime = state.runtime.write().await;
     runtime.camera_moving = false;
     runtime.camera_settle_until = Some(Instant::now() + duration);
     runtime.tracking = false;
     runtime.target_offset = AxisValue::default();
     refresh_runtime_flags(&mut runtime);
+    publish_state(&runtime, &state.events);
+}
+
+fn ai_state_response(state: &AiRuntime) -> AiStateResponse {
+    let camera_moving = state.camera_motion_active();
+    AiStateResponse {
+        enabled: state.enabled,
+        configured: state.configured,
+        available: state.available,
+        ai_active: state.ai_active,
+        tracking: state.tracking,
+        recording: state.recording,
+        manual_locked: state.enabled && (state.ai_active || camera_moving),
+        camera_moving,
+        target_offset: state.target_offset,
+        ptz_velocity: state.ptz_velocity,
+        last_error: state.last_error.clone(),
+    }
+}
+
+fn publish_state(state: &AiRuntime, events: &watch::Sender<AiStateResponse>) {
+    let _ = events.send(ai_state_response(state));
 }
 
 fn refresh_runtime_flags(runtime: &mut AiRuntime) {
