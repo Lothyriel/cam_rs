@@ -100,7 +100,7 @@ impl OnvifService {
         &self,
         override_profile_token: Option<&str>,
     ) -> Result<OnvifPresetsResponse, OnvifError> {
-        let profile = self.resolve_profile_token(override_profile_token)?;
+        let profile = self.resolve_profile_token(override_profile_token).await?;
 
         let soap = format!(
             r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
@@ -124,7 +124,9 @@ impl OnvifService {
     }
 
     pub async fn move_camera(&self, payload: MoveRequest) -> Result<&'static str, OnvifError> {
-        let profile = self.resolve_profile_token(payload.profile_token.as_deref())?;
+        let profile = self
+            .resolve_profile_token(payload.profile_token.as_deref())
+            .await?;
         let zoom = payload.zoom.unwrap_or(0.0);
 
         let soap = format!(
@@ -150,7 +152,9 @@ impl OnvifService {
     }
 
     pub async fn stop(&self, payload: StopRequest) -> Result<&'static str, OnvifError> {
-        let profile = self.resolve_profile_token(payload.profile_token.as_deref())?;
+        let profile = self
+            .resolve_profile_token(payload.profile_token.as_deref())
+            .await?;
         let soap = format!(
             r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
   <s:Body>
@@ -169,7 +173,9 @@ impl OnvifService {
     }
 
     pub async fn goto_preset(&self, payload: PresetRequest) -> Result<&'static str, OnvifError> {
-        let profile = self.resolve_profile_token(payload.profile_token.as_deref())?;
+        let profile = self
+            .resolve_profile_token(payload.profile_token.as_deref())
+            .await?;
         let soap = format!(
             r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
   <s:Body>
@@ -187,14 +193,26 @@ impl OnvifService {
         Ok("goto preset sent")
     }
 
-    fn resolve_profile_token(&self, override_token: Option<&str>) -> Result<String, OnvifError> {
-        override_token
+    async fn resolve_profile_token(
+        &self,
+        override_token: Option<&str>,
+    ) -> Result<String, OnvifError> {
+        if let Some(profile) = override_token
             .filter(|v| !v.trim().is_empty())
             .map(ToString::to_string)
             .or_else(|| self.cfg.profile_token.clone())
+        {
+            return Ok(profile);
+        }
+
+        let profiles = self.profiles().await?.profiles;
+        profiles
+            .into_iter()
+            .next()
+            .map(|profile| profile.token)
             .ok_or_else(|| {
                 OnvifError::BadRequest(
-                    "ONVIF_PROFILE_TOKEN is not set. Use /api/onvif/profiles first.".to_string(),
+                    "No ONVIF profile token available from camera or configuration.".to_string(),
                 )
             })
     }
