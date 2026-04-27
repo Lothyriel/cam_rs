@@ -32,6 +32,11 @@ struct AppConfig {
     ai: AiConfig,
 }
 
+#[derive(serde::Deserialize)]
+struct AiEnabledRequest {
+    enabled: bool,
+}
+
 impl AppConfig {
     fn from_env() -> Result<Self, String> {
         let webrtc_url =
@@ -101,6 +106,7 @@ async fn main() {
         .route("/api/onvif/stop", post(onvif_stop))
         .route("/api/onvif/goto-preset", post(onvif_goto_preset))
         .route("/api/ai/state", get(ai_state))
+        .route("/api/ai/enabled", post(ai_enabled))
         .with_state(app_state);
 
     let addr = (Ipv6Addr::UNSPECIFIED, 5000);
@@ -151,24 +157,39 @@ async fn onvif_move(
     State(state): State<AppState>,
     Json(payload): Json<MoveRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let velocity = ai::AxisValue {
+        x: payload.x,
+        y: payload.y,
+    };
     state
-        .onvif
-        .move_camera(payload)
-        .await
-        .map_err(map_onvif_error)
+        .ai
+        .note_camera_move_started(velocity)
+        .await;
+    match state.onvif.move_camera(payload).await {
+        Ok(message) => Ok(message),
+        Err(err) => {
+            state.ai.note_camera_move_stopped().await;
+            Err(map_onvif_error(err))
+        }
+    }
 }
 
 async fn onvif_stop(
     State(state): State<AppState>,
     Json(payload): Json<StopRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    state.onvif.stop(payload).await.map_err(map_onvif_error)
+    let result = state.onvif.stop(payload).await.map_err(map_onvif_error);
+    if result.is_ok() {
+        state.ai.note_camera_move_stopped().await;
+    }
+    result
 }
 
 async fn onvif_goto_preset(
     State(state): State<AppState>,
     Json(payload): Json<PresetRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    state.ai.note_camera_preset_move().await;
     state
         .onvif
         .goto_preset(payload)
@@ -178,6 +199,18 @@ async fn onvif_goto_preset(
 
 async fn ai_state(State(state): State<AppState>) -> Json<AiStateResponse> {
     Json(state.ai.snapshot().await)
+}
+
+async fn ai_enabled(
+    State(state): State<AppState>,
+    Json(payload): Json<AiEnabledRequest>,
+) -> Result<Json<AiStateResponse>, (StatusCode, String)> {
+    state
+        .ai
+        .set_enabled(payload.enabled)
+        .await
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    Ok(Json(state.ai.snapshot().await))
 }
 
 fn map_onvif_error(err: OnvifError) -> (StatusCode, String) {

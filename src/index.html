@@ -219,6 +219,53 @@
       color: #334155;
     }
 
+    .ai-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 10px 12px;
+      border: 1px solid #d8e4f2;
+      border-radius: 12px;
+      background: #fff;
+    }
+
+    .ai-toggle-copy {
+      display: grid;
+      gap: 2px;
+    }
+
+    .ai-toggle-copy strong {
+      font-size: 0.88rem;
+      color: #1e293b;
+    }
+
+    .ai-toggle-copy span {
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .ai-toggle-btn {
+      min-height: 42px;
+      min-width: 124px;
+      padding: 0 14px;
+      font-size: 0.92rem;
+      letter-spacing: 0.02em;
+    }
+
+    .ai-toggle-btn.on {
+      border-color: #8ee0d3;
+      background: #ccfbf1;
+      color: #115e59;
+    }
+
+    .ai-toggle-btn.off {
+      border-color: #fecaca;
+      background: #fff1f2;
+      color: #991b1b;
+    }
+
     .ai-joystick {
       display: inline-flex;
       align-items: center;
@@ -310,6 +357,13 @@
 
         <div class="ai-panel">
           <div class="ai-banner" id="ai-banner">Manual PTZ</div>
+          <div class="ai-toolbar">
+            <div class="ai-toggle-copy">
+              <strong>AI Control</strong>
+              <span id="ai-toggle-help">Auto-tracking follows motion events.</span>
+            </div>
+            <button type="button" class="ai-toggle-btn" id="ai-toggle-btn">Loading…</button>
+          </div>
           <div class="ai-grid">
             <div>
               <strong>Tracking</strong>
@@ -326,6 +380,10 @@
             <div>
               <strong>Recording</strong>
               <span id="ai-recording">Idle</span>
+            </div>
+            <div>
+              <strong>Camera Motion</strong>
+              <span id="ai-camera-motion">Stable</span>
             </div>
           </div>
           <div class="ai-joystick" id="ai-joystick">·</div>
@@ -371,12 +429,18 @@
     const aiOffsetEl = document.getElementById('ai-offset');
     const aiVelocityEl = document.getElementById('ai-velocity');
     const aiRecordingEl = document.getElementById('ai-recording');
+    const aiCameraMotionEl = document.getElementById('ai-camera-motion');
     const aiJoystickEl = document.getElementById('ai-joystick');
+    const aiToggleBtn = document.getElementById('ai-toggle-btn');
+    const aiToggleHelpEl = document.getElementById('ai-toggle-help');
     const manualButtons = [...document.querySelectorAll('#ptz-controls button[data-x]'), goHomeBtn];
 
     let selectedProfileToken = CONFIGURED_PROFILE_TOKEN || null;
     let selectedPresetToken = null;
     let manualLocked = false;
+    let aiEnabled = false;
+    let aiConfigured = false;
+    let aiTogglePending = false;
 
     const webrtcFrame = document.getElementById('webrtc-frame');
     webrtcFrame.src = WEBRTC_URL;
@@ -409,23 +473,79 @@
       return `${vertical}${horizontal}` || '·';
     }
 
+    function syncAiToggleUi() {
+      if (!aiConfigured) {
+        aiToggleBtn.textContent = 'Unavailable';
+        aiToggleBtn.disabled = true;
+        aiToggleBtn.classList.remove('on', 'off');
+        aiToggleHelpEl.textContent = 'Set RTSP_URL or AI_RTSP_URL to enable AI.';
+        return;
+      }
+
+      aiToggleBtn.disabled = aiTogglePending;
+      aiToggleBtn.textContent = aiTogglePending
+        ? 'Saving…'
+        : aiEnabled
+          ? 'Disable AI'
+          : 'Enable AI';
+      aiToggleBtn.classList.toggle('on', aiEnabled);
+      aiToggleBtn.classList.toggle('off', !aiEnabled);
+      aiToggleHelpEl.textContent = aiEnabled
+        ? 'AI is armed for motion-triggered tracking.'
+        : 'AI is paused. Manual PTZ stays available.';
+    }
+
+    async function setAiEnabled(enabled) {
+      aiTogglePending = true;
+      syncAiToggleUi();
+      try {
+        const res = await fetch('/api/ai/enabled', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({enabled})
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || data?.last_error || JSON.stringify(data));
+        await applyAiState(data);
+        setStatus(enabled ? 'AI enabled' : 'AI disabled');
+      } catch (err) {
+        setStatus(`Error: ${err.message}`, true);
+      } finally {
+        aiTogglePending = false;
+        syncAiToggleUi();
+      }
+    }
+
     async function applyAiState(data) {
       const enabled = Boolean(data?.enabled);
-      const available = Boolean(enabled && data?.available);
+      const configured = Boolean(data?.configured);
+      const available = Boolean(enabled && configured && data?.available);
       const locked = Boolean(data?.manual_locked);
+      const cameraMoving = Boolean(data?.camera_moving);
+
+      aiEnabled = enabled;
+      aiConfigured = configured;
+      syncAiToggleUi();
 
       aiBannerEl.textContent = locked
-        ? 'Auto-tracking active'
+        ? cameraMoving
+          ? 'Camera moving'
+          : 'Auto-tracking active'
         : available
           ? 'Manual PTZ'
           : enabled
-            ? 'AI reconnecting'
-            : 'AI disabled';
-      aiBannerEl.classList.toggle('active', locked);
+            ? configured
+              ? 'AI reconnecting'
+              : 'AI unconfigured'
+            : configured
+              ? 'AI disabled'
+              : 'AI unconfigured';
+      aiBannerEl.classList.toggle('active', locked || enabled);
       aiTrackingEl.textContent = data?.tracking ? 'Following target' : 'Idle';
       aiOffsetEl.textContent = formatAxis(data?.target_offset);
       aiVelocityEl.textContent = formatAxis(data?.ptz_velocity);
       aiRecordingEl.textContent = data?.recording ? 'Saving after event' : 'Idle';
+      aiCameraMotionEl.textContent = cameraMoving ? 'Settling' : 'Stable';
       aiJoystickEl.textContent = `${toArrow(data?.target_offset)} / ${toArrow(data?.ptz_velocity)}`;
 
       manualButtons.forEach((button) => {
@@ -464,6 +584,7 @@
         aiBannerEl.classList.remove('active');
         aiTrackingEl.textContent = 'Unknown';
         aiRecordingEl.textContent = 'Unknown';
+        aiCameraMotionEl.textContent = 'Unknown';
         aiJoystickEl.textContent = '!';
       }
     }
@@ -533,7 +654,7 @@
 
     goHomeBtn.addEventListener('click', async () => {
       try {
-        if (manualLocked) throw new Error('Manual PTZ is disabled while auto-tracking is active');
+        if (manualLocked) throw new Error('Manual PTZ is disabled while AI is active or the camera is still settling');
         if (!selectedPresetToken) throw new Error('No preset token available for this profile');
         await postJson('/api/onvif/goto-preset', {
           preset_token: selectedPresetToken,
@@ -542,6 +663,11 @@
       } catch (err) {
         setStatus(`Error: ${err.message}`, true);
       }
+    });
+
+    aiToggleBtn.addEventListener('click', async () => {
+      if (!aiConfigured || aiTogglePending) return;
+      await setAiEnabled(!aiEnabled);
     });
 
     let activeMoveButton = null;
