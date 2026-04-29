@@ -12,8 +12,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
     fs,
     io::AsyncReadExt,
-    process::Command,
-    sync::{RwLock, watch},
+    process::{Child, Command},
+    sync::{Mutex, RwLock, watch},
+    task::JoinHandle,
     time::{MissedTickBehavior, interval, sleep},
 };
 
@@ -36,6 +37,9 @@ const DEFAULT_PRESET_SETTLE_MS: u64 = 3000;
 #[derive(Clone)]
 pub struct AiController {
     shared: Arc<AiShared>,
+    workers: Arc<Mutex<Option<AiWorkers>>>,
+    cfg: AiConfig,
+    onvif: OnvifService,
     camera_settle: Duration,
     preset_settle: Duration,
 }
@@ -43,6 +47,13 @@ pub struct AiController {
 struct AiShared {
     runtime: RwLock<AiRuntime>,
     events: watch::Sender<AiStateResponse>,
+}
+
+struct AiWorkers {
+    shutdown: watch::Sender<bool>,
+    detection: JoinHandle<()>,
+    ptz: JoinHandle<()>,
+    recording: JoinHandle<()>,
 }
 
 #[derive(Clone)]
@@ -226,6 +237,8 @@ impl AiConfig {
 
 impl AiController {
     pub fn spawn(cfg: AiConfig, onvif: OnvifService) -> Self {
+        let camera_settle = cfg.camera_settle;
+        let preset_settle = cfg.preset_settle;
         let runtime = AiRuntime {
             enabled: cfg.enabled,
             configured: cfg.configured,
@@ -237,31 +250,19 @@ impl AiController {
             events,
         });
 
-        if cfg.configured {
-            let detection_state = Arc::clone(&shared);
-            let detection_cfg = cfg.clone();
-            tokio::spawn(async move {
-                run_detection_loop(detection_cfg, detection_state).await;
-            });
-
-            let ptz_state = Arc::clone(&shared);
-            let ptz_cfg = cfg.clone();
-            let ptz_onvif = onvif.clone();
-            tokio::spawn(async move {
-                run_ptz_loop(ptz_cfg, ptz_onvif, ptz_state).await;
-            });
-
-            let record_state = Arc::clone(&shared);
-            let record_cfg = cfg.clone();
-            tokio::spawn(async move {
-                run_recording_loop(record_cfg, onvif, record_state).await;
-            });
-        }
+        let workers = if cfg.enabled && cfg.configured {
+            Some(spawn_workers(cfg.clone(), onvif.clone(), Arc::clone(&shared)))
+        } else {
+            None
+        };
 
         Self {
             shared,
-            camera_settle: cfg.camera_settle,
-            preset_settle: cfg.preset_settle,
+            workers: Arc::new(Mutex::new(workers)),
+            cfg,
+            onvif,
+            camera_settle,
+            preset_settle,
         }
     }
 
@@ -275,23 +276,34 @@ impl AiController {
     }
 
     pub async fn set_enabled(&self, enabled: bool) -> Result<(), String> {
-        let mut state = self.shared.runtime.write().await;
-        if enabled && !state.configured {
-            return Err("AI is not configured. Set RTSP_URL or AI_RTSP_URL first.".to_string());
+        {
+            let mut state = self.shared.runtime.write().await;
+            if enabled && !state.configured {
+                return Err("AI is not configured. Set RTSP_URL or AI_RTSP_URL first.".to_string());
+            }
+
+            state.enabled = enabled;
+            if !enabled {
+                state.available = false;
+                state.camera_moving = false;
+                state.camera_settle_until = None;
+                state.recording = false;
+                state.tracking = false;
+                state.motion_active = false;
+                state.target_offset = AxisValue::default();
+                state.ptz_velocity = AxisValue::default();
+                state.last_error = None;
+            }
+            refresh_runtime_flags(&mut state);
+            publish_state(&state, &self.shared.events);
         }
 
-        state.enabled = enabled;
-        if !enabled {
-            state.camera_moving = false;
-            state.camera_settle_until = None;
-            state.recording = false;
-            state.tracking = false;
-            state.motion_active = false;
-            state.target_offset = AxisValue::default();
-            state.ptz_velocity = AxisValue::default();
+        if enabled {
+            self.ensure_workers_running().await;
+        } else {
+            self.stop_workers().await;
         }
-        refresh_runtime_flags(&mut state);
-        publish_state(&state, &self.shared.events);
+
         Ok(())
     }
 
@@ -305,6 +317,78 @@ impl AiController {
 
     pub async fn note_camera_preset_move(&self) {
         mark_camera_motion_for(&self.shared, self.preset_settle).await;
+    }
+
+    async fn ensure_workers_running(&self) {
+        if !self.cfg.configured {
+            return;
+        }
+
+        let mut workers = self.workers.lock().await;
+        if workers.is_none() {
+            *workers = Some(spawn_workers(
+                self.cfg.clone(),
+                self.onvif.clone(),
+                Arc::clone(&self.shared),
+            ));
+        }
+    }
+
+    async fn stop_workers(&self) {
+        let workers = {
+            let mut guard = self.workers.lock().await;
+            guard.take()
+        };
+
+        if let Some(workers) = workers {
+            workers.stop().await;
+        }
+    }
+}
+
+impl AiWorkers {
+    async fn stop(self) {
+        let _ = self.shutdown.send(true);
+        let _ = self.detection.await;
+        let _ = self.ptz.await;
+        let _ = self.recording.await;
+    }
+}
+
+fn spawn_workers(cfg: AiConfig, onvif: OnvifService, shared: Arc<AiShared>) -> AiWorkers {
+    let (shutdown, detection_shutdown) = watch::channel(false);
+    let ptz_shutdown = detection_shutdown.clone();
+    let recording_shutdown = detection_shutdown.clone();
+
+    let detection = {
+        let detection_state = Arc::clone(&shared);
+        let detection_cfg = cfg.clone();
+        tokio::spawn(async move {
+            run_detection_loop(detection_cfg, detection_state, detection_shutdown).await;
+        })
+    };
+
+    let ptz = {
+        let ptz_state = Arc::clone(&shared);
+        let ptz_cfg = cfg.clone();
+        let ptz_onvif = onvif.clone();
+        tokio::spawn(async move {
+            run_ptz_loop(ptz_cfg, ptz_onvif, ptz_state, ptz_shutdown).await;
+        })
+    };
+
+    let recording = {
+        let record_state = Arc::clone(&shared);
+        tokio::spawn(async move {
+            run_recording_loop(cfg, onvif, record_state, recording_shutdown).await;
+        })
+    };
+
+    AiWorkers {
+        shutdown,
+        detection,
+        ptz,
+        recording,
     }
 }
 
@@ -517,26 +601,42 @@ impl MotionDetector {
     }
 }
 
-async fn run_detection_loop(cfg: AiConfig, state: Arc<AiShared>) {
+async fn run_detection_loop(cfg: AiConfig, state: Arc<AiShared>, mut shutdown: watch::Receiver<bool>) {
     let mut backoff = Duration::from_secs(1);
 
     loop {
-        match run_detection_session(&cfg, Arc::clone(&state)).await {
-            Ok(()) => backoff = Duration::from_secs(1),
+        if *shutdown.borrow() {
+            break;
+        }
+
+        match run_detection_session(&cfg, Arc::clone(&state), shutdown.clone()).await {
+            Ok(true) => break,
+            Ok(false) => backoff = Duration::from_secs(1),
             Err(err) => {
                 update_error(&state, err).await;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
         }
         set_available(&state, false).await;
-        sleep(backoff).await;
+
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
+                }
+            }
+            _ = sleep(backoff) => {}
+        }
     }
+
+    set_available(&state, false).await;
 }
 
 async fn run_detection_session(
     cfg: &AiConfig,
     state: Arc<AiShared>,
-) -> Result<(), String> {
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<bool, String> {
     let filter = format!(
         "fps={},scale={}x{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,format=gray",
         cfg.detection_fps,
@@ -595,7 +695,15 @@ async fn run_detection_session(
     let mut motion_active = false;
 
     loop {
-        match stdout.read_exact(&mut frame).await {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    stop_child(&mut child).await;
+                    let _ = stderr_task.await;
+                    return Ok(true);
+                }
+            }
+            read = stdout.read_exact(&mut frame) => match read {
             Ok(_) => {
                 let suppress_detection = {
                     let runtime = state.runtime.read().await;
@@ -631,8 +739,7 @@ async fn run_detection_session(
                 }
             }
             Err(err) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                stop_child(&mut child).await;
                 let stderr = stderr_task.await.unwrap_or_default();
                 let detail = if stderr.is_empty() {
                     format!("FFmpeg detection stream ended: {err}")
@@ -641,18 +748,32 @@ async fn run_detection_session(
                 };
                 return Err(detail);
             }
+            }
         }
     }
 }
 
-async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<AiShared>) {
+async fn run_ptz_loop(
+    cfg: AiConfig,
+    onvif: OnvifService,
+    state: Arc<AiShared>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let mut ticker = interval(cfg.ptz_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut last_sent = AxisValue::default();
     let mut centered_since = None;
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                continue;
+            }
+            _ = ticker.tick() => {}
+        }
 
         let snapshot = {
             let runtime = state.runtime.read().await;
@@ -752,28 +873,61 @@ async fn run_ptz_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<AiShared>) 
             }
         }
     }
+
+    if last_sent.x.abs() > PTZ_STOP_THRESHOLD || last_sent.y.abs() > PTZ_STOP_THRESHOLD {
+        match onvif
+            .stop(crate::onvif::models::StopRequest {
+                profile_token: None,
+            })
+            .await
+        {
+            Ok(_) => clear_error(&state).await,
+            Err(err) => update_error(&state, err.message()).await,
+        }
+    }
 }
 
-async fn run_recording_loop(cfg: AiConfig, onvif: OnvifService, state: Arc<AiShared>) {
+async fn run_recording_loop(
+    cfg: AiConfig,
+    onvif: OnvifService,
+    state: Arc<AiShared>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let mut backoff = Duration::from_secs(1);
 
     loop {
-        match run_recording_session(&cfg, &onvif, Arc::clone(&state)).await {
-            Ok(()) => backoff = Duration::from_secs(1),
+        if *shutdown.borrow() {
+            break;
+        }
+
+        match run_recording_session(&cfg, &onvif, Arc::clone(&state), shutdown.clone()).await {
+            Ok(true) => break,
+            Ok(false) => backoff = Duration::from_secs(1),
             Err(err) => {
                 update_error(&state, err).await;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
         }
-        sleep(backoff).await;
+
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
+                }
+            }
+            _ = sleep(backoff) => {}
+        }
     }
+
+    set_recording_state(&state, false).await;
 }
 
 async fn run_recording_session(
     cfg: &AiConfig,
     onvif: &OnvifService,
     state: Arc<AiShared>,
-) -> Result<(), String> {
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<bool, String> {
     let mut child = Command::new(&cfg.ffmpeg_bin)
         .args([
             "-hide_banner",
@@ -817,13 +971,20 @@ async fn run_recording_session(
     let mut buf = vec![0u8; RECORDING_CHUNK_SIZE];
 
     loop {
-        let read = stdout
-            .read(&mut buf)
-            .await
-            .map_err(|e| format!("failed to read FFmpeg recording stream: {e}"))?;
+        let read = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    stop_child(&mut child).await;
+                    let _ = stderr_task.await;
+                    return Ok(true);
+                }
+                continue;
+            }
+            read = stdout.read(&mut buf) => read
+                .map_err(|e| format!("failed to read FFmpeg recording stream: {e}"))?,
+        };
         if read == 0 {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            stop_child(&mut child).await;
             let stderr = stderr_task.await.unwrap_or_default();
             if stderr.is_empty() {
                 return Err("FFmpeg recording stream ended unexpectedly".to_string());
@@ -934,6 +1095,11 @@ async fn return_home(cfg: &AiConfig, onvif: &OnvifService, state: &Arc<AiShared>
     runtime.target_offset = AxisValue::default();
     refresh_runtime_flags(&mut runtime);
     publish_state(&runtime, &state.events);
+}
+
+async fn stop_child(child: &mut Child) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 fn recording_path(root: &PathBuf, started_at: OffsetDateTime) -> Result<PathBuf, String> {
