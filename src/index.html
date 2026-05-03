@@ -82,6 +82,12 @@
       padding: 14px 16px;
     }
 
+    .ptz-body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
     .video-wrap {
       width: 100%;
       aspect-ratio: 16 / 6.5;
@@ -101,6 +107,11 @@
       display: grid;
       gap: 6px;
       margin-bottom: 12px;
+    }
+
+    .ptz-body .select-wrap {
+      order: 1;
+      margin-bottom: 0;
     }
 
     .select-wrap label {
@@ -157,6 +168,11 @@
       margin-bottom: 12px;
     }
 
+    .ptz-body .dpad {
+      order: 3;
+      margin-bottom: 0;
+    }
+
     .dpad .ghost {
       visibility: hidden;
       pointer-events: none;
@@ -178,6 +194,10 @@
       grid-template-columns: 1fr;
     }
 
+    .ptz-body .lists {
+      order: 4;
+    }
+
     .ai-panel {
       display: grid;
       gap: 10px;
@@ -186,6 +206,11 @@
       border: 1px solid var(--line);
       border-radius: 12px;
       background: #f8fbff;
+    }
+
+    .ptz-body .ai-panel {
+      order: 2;
+      margin-bottom: 0;
     }
 
     .ai-banner {
@@ -320,12 +345,33 @@
       color: var(--ok);
     }
 
+    .ptz-body #status {
+      order: 5;
+      margin-top: 0;
+    }
+
     #status.error {
       color: var(--danger);
     }
 
     @media (max-width: 920px) {
-      .video-wrap { aspect-ratio: 16 / 10; }
+      body { padding: 12px; }
+
+      .video-wrap {
+        aspect-ratio: 4 / 3;
+        min-height: min(58vh, 420px);
+      }
+    }
+
+    @media (max-width: 640px) {
+      .ptz-body .dpad {
+        order: 2;
+        max-width: none;
+      }
+
+      .ptz-body .ai-panel {
+        order: 3;
+      }
     }
   </style>
 </head>
@@ -337,7 +383,7 @@
         <h2>Live Video</h2>
         <span class="chip">WebRTC</span>
       </div>
-      <div class="card-body">
+      <div class="card-body ptz-body">
         <div class="video-wrap">
           <iframe id="webrtc-frame" allow="autoplay; fullscreen; picture-in-picture"></iframe>
         </div>
