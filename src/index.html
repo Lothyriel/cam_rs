@@ -358,11 +358,15 @@
       body { padding: 12px; }
 
       .video-wrap {
-        aspect-ratio: 4 / 3;
+        aspect-ratio: 16 / 10;
       }
     }
 
     @media (max-width: 640px) {
+      .video-wrap {
+        aspect-ratio: 4 / 3;
+      }
+
       .ptz-body .dpad {
         order: 2;
         max-width: none;
