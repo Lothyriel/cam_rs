@@ -325,7 +325,23 @@
     }
 
     @media (max-width: 920px) {
-      .video-wrap { aspect-ratio: 16 / 10; }
+      body {
+        padding: 12px;
+      }
+
+      .shell {
+        gap: 12px;
+      }
+
+      .card-head,
+      .card-body {
+        padding-left: 12px;
+        padding-right: 12px;
+      }
+
+      .video-wrap {
+        aspect-ratio: 4 / 3;
+      }
     }
   </style>
 </head>
@@ -353,6 +369,20 @@
         <div class="select-wrap">
           <label for="profile-select">Profile</label>
           <select id="profile-select"></select>
+        </div>
+
+        <div class="dpad" id="ptz-controls">
+          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
+          <button data-x="0" data-y="0.45" aria-label="Move up">↑</button>
+          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
+
+          <button data-x="-0.45" data-y="0" aria-label="Move left">←</button>
+          <button class="home" data-preset="1" disabled aria-label="Go home">Home</button>
+          <button data-x="0.45" data-y="0" aria-label="Move right">→</button>
+
+          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
+          <button data-x="0" data-y="-0.45" aria-label="Move down">↓</button>
+          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
         </div>
 
         <div class="ai-panel">
@@ -387,20 +417,6 @@
             </div>
           </div>
           <div class="ai-joystick" id="ai-joystick">·</div>
-        </div>
-
-        <div class="dpad" id="ptz-controls">
-          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
-          <button data-x="0" data-y="0.45" aria-label="Move up">↑</button>
-          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
-
-          <button data-x="-0.45" data-y="0" aria-label="Move left">←</button>
-          <button class="home" data-preset="1" disabled aria-label="Go home">Home</button>
-          <button data-x="0.45" data-y="0" aria-label="Move right">→</button>
-
-          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
-          <button data-x="0" data-y="-0.45" aria-label="Move down">↓</button>
-          <button class="ghost" aria-hidden="true" tabindex="-1"></button>
         </div>
 
         <div class="lists">
